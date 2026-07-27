@@ -73,9 +73,9 @@ void XorCursorEffect::hideCursor()
     }
 }
 
-void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const QRegion &region, Output *screen)
+void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
-    effects->paintScreen(renderTarget, viewport, mask, region, screen);
+    effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
     if (!m_isMouseHidden) {
         return;
     }
@@ -89,7 +89,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     const QPointF p = effects->cursorPos() - cursor.hotSpot();
     const auto scale = viewport.scale();
 
-    QRegion cursorRegion = QRegion(QRectF(p, cursorSize).toAlignedRect());
+    Region cursorRegion = Region(Rect(QRectF(p, cursorSize).toAlignedRect()));
     effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 	glEnable(GL_COLOR_LOGIC_OP);
     glLogicOp(GL_XOR);

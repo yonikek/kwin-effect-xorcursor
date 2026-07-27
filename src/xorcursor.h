@@ -25,7 +25,7 @@ public:
     XorCursorEffect();
     ~XorCursorEffect() override;
 
-    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const QRegion &region, Output *screen) override;
+    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen) override;
     bool isActive() const override;
 
 private Q_SLOTS:
