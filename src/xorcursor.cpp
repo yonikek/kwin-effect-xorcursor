@@ -85,11 +85,13 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     }
 
     const auto cursor = effects->cursorImage();
-    QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-    const QPointF p = effects->cursorPos() - cursor.hotSpot();
-    const auto scale = viewport.scale();
+	QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
+	const QPointF p = effects->cursorPos() - cursor.hotSpot();
+	const auto scale = viewport.scale();
 
-    Region cursorRegion = Region(Rect(QRectF(p, cursorSize).toAlignedRect()));
+	// FIX: Scale logical coordinates to device coordinates for the deviceRegion
+	QRectF cursorDeviceRect(p.x() * scale, p.y() * scale, cursorSize.width() * scale, cursorSize.height() * scale);
+	Region cursorRegion = Region(Rect(cursorDeviceRect.toAlignedRect()));
     effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 	glEnable(GL_COLOR_LOGIC_OP);
     glLogicOp(GL_XOR);
