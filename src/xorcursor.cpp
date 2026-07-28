@@ -112,13 +112,9 @@ bool XorCursorEffect::isActive() const
 
 void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
 {
+    m_cursorPoint = pos.toPoint();
     if (pos != old) {
-        const auto cursor = effects->cursorImage();
-        QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-        
-        // Schedule repaints only for the old and new cursor bounding boxes (logical coordinates)
-        effects->addRepaint(QRectF(old - cursor.hotSpot(), cursorSize).toAlignedRect());
-        effects->addRepaint(QRectF(pos - cursor.hotSpot(), cursorSize).toAlignedRect());
+        effects->addRepaintFull();
     }
 }
 
