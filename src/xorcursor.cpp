@@ -112,9 +112,13 @@ bool XorCursorEffect::isActive() const
 
 void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
 {
-    m_cursorPoint = pos.toPoint();
     if (pos != old) {
-        effects->addRepaintFull();
+        const auto cursor = effects->cursorImage();
+        QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
+        
+        // Explicitly construct KWin::Rect to resolve the overload ambiguity in KWin 6
+        effects->addRepaint(KWin::Rect(QRectF(old - cursor.hotSpot(), cursorSize).toAlignedRect()));
+        effects->addRepaint(KWin::Rect(QRectF(pos - cursor.hotSpot(), cursorSize).toAlignedRect()));
     }
 }
 
