@@ -87,6 +87,8 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     const auto cursor = effects->cursorImage();
 	QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
 	const QPointF p = effects->cursorPos() - cursor.hotSpot();
+    // Store the exact logical bounding box for the next frame's cleanup
+    m_lastCursorRect = QRectF(p, cursorSize).toAlignedRect();
 	const auto scale = viewport.scale();
 
 	// FIX: Scale logical coordinates to device coordinates for the deviceRegion
@@ -115,19 +117,13 @@ void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
     if (pos != old) {
         const auto cursor = effects->cursorImage();
         QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-        
-        // Add a small safety margin (e.g., 4 pixels) to ensure cursor shape 
-        // changes or sub-pixel edges are fully repainted and don't leave artifacts.
-        const int margin = 4; 
-        
-        // Calculate and expand the old cursor's repaint region
-        QRect oldRect = QRectF(old - cursor.hotSpot(), cursorSize).toAlignedRect();
-        oldRect.adjust(-margin, -margin, margin, margin);
-        effects->addRepaint(KWin::Rect(oldRect));
-        
-        // Calculate and expand the new cursor's repaint region
+
+        // Calculate the exact bounding box of the NEW cursor
         QRect newRect = QRectF(pos - cursor.hotSpot(), cursorSize).toAlignedRect();
-        newRect.adjust(-margin, -margin, margin, margin);
+
+        // Repaint the exact area of the PREVIOUS cursor (handles shape changes perfectly)
+        // and the exact area of the NEW cursor.
+        effects->addRepaint(KWin::Rect(m_lastCursorRect));
         effects->addRepaint(KWin::Rect(newRect));
     }
 }

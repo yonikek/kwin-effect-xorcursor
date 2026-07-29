@@ -40,6 +40,8 @@ private:
     std::unique_ptr<GLTexture> m_cursorTexture;
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
+    // Tracks the exact logical bounding box of the cursor from the previous frame
+    QRect m_lastCursorRect;
 };
 
 } // namespace KWin
