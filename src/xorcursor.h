@@ -40,7 +40,6 @@ private:
     std::unique_ptr<GLTexture> m_cursorTexture;
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
-    QPoint m_cursorPoint;
 };
 
 } // namespace KWin
