@@ -116,9 +116,19 @@ void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
         const auto cursor = effects->cursorImage();
         QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
         
-        // Explicitly construct KWin::Rect to resolve the overload ambiguity in KWin 6
-        effects->addRepaint(KWin::Rect(QRectF(old - cursor.hotSpot(), cursorSize).toAlignedRect()));
-        effects->addRepaint(KWin::Rect(QRectF(pos - cursor.hotSpot(), cursorSize).toAlignedRect()));
+        // Add a small safety margin (e.g., 4 pixels) to ensure cursor shape 
+        // changes or sub-pixel edges are fully repainted and don't leave artifacts.
+        const int margin = 4; 
+        
+        // Calculate and expand the old cursor's repaint region
+        QRect oldRect = QRectF(old - cursor.hotSpot(), cursorSize).toAlignedRect();
+        oldRect.adjust(-margin, -margin, margin, margin);
+        effects->addRepaint(KWin::Rect(oldRect));
+        
+        // Calculate and expand the new cursor's repaint region
+        QRect newRect = QRectF(pos - cursor.hotSpot(), cursorSize).toAlignedRect();
+        newRect.adjust(-margin, -margin, margin, margin);
+        effects->addRepaint(KWin::Rect(newRect));
     }
 }
 
