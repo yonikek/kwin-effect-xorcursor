@@ -1,20 +1,14 @@
-/*
- S PDX-FileCopyri*ghtText: 2025 Jin Liu <m.liu.jin@gmail.com>
-
- SPDX-License-Identifier: GPL-2.0-or-later
- */
-
 #pragma once
 
 #include "core/colorspace.h"
 #include "effect/effect.h"
 
+#include <memory>
+
 namespace KWin
 {
 
-    class GLFramebuffer;
     class GLTexture;
-    class GLVertexBuffer;
     class GLShader;
 
     class XorCursorEffect : public Effect

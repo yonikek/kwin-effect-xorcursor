@@ -1,9 +1,3 @@
-/*
- S PDX-FileCopyrightText: *2025 Jin Liu <m.liu.jin@gmail.com>
-
- SPDX-License-Identifier: GPL-2.0-or-later
- */
-
 #include "xorcursor.h"
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
@@ -12,6 +6,10 @@
 #include "opengl/glshadermanager.h"
 #include "opengl/gltexture.h"
 #include "opengl/glutils.h"
+
+#include <QLoggingCategory>
+
+Q_LOGGING_CATEGORY(KWIN_XOR_CURSOR, "kwin_effect_xorcursor", QtWarningMsg)
 
 namespace KWin
 {
@@ -80,40 +78,34 @@ namespace KWin
             return;
         }
 
-        // IMPORTANT: Do NOT include "#version 140" here.
-        // generateCustomShader() prepends "#version 140" + TRAIT_* defines
-        // before the custom source. A second #version causes a compile error,
-        // which returns nullptr and crashes on setUniform.
-        const QByteArray fragmentShader = QByteArrayLiteral(
+        // IMPORTANT: Do NOT include #version here.
+        // KWin's generateCustomShader prepends #version 140 + #defines automatically.
+        const QByteArray fragmentSource = QByteArrayLiteral(
             "uniform sampler2D sampler;\n"
-            "uniform sampler2D screenSampler;\n"
             "in vec2 texcoord0;\n"
             "out vec4 fragColor;\n"
             "\n"
             "void main() {\n"
-            "    vec4 cursor = texture(sampler, texcoord0);\n"
-            "    vec4 bg = texture(screenSampler, texcoord0);\n"
-            "\n"
-            "    // Plasma invert mechanism: invert in gamma 2.2 space\n"
-            "    vec3 bgRgb = bg.rgb / max(bg.a, 0.001);\n"
-            "    bgRgb = pow(bgRgb, vec3(1.0 / 2.2));\n"
-            "    bgRgb = vec3(1.0) - bgRgb;\n"
-            "    bgRgb = pow(bgRgb, vec3(2.2));\n"
-            "    bgRgb *= bg.a;\n"
-            "\n"
-            "    // Mix: where cursor is opaque show inverted bg, else original\n"
-            "    vec3 result = mix(bg.rgb, bgRgb, cursor.a);\n"
-            "    fragColor = vec4(result, 1.0);\n"
+            "    vec4 tex = texture(sampler, texcoord0);\n"
+            "    // Invert in gamma space (same as Plasma invert effect)\n"
+            "    vec3 rgb = tex.rgb / max(tex.a, 0.001);\n"
+            "    rgb = pow(rgb, vec3(1.0 / 2.2));\n"
+            "    rgb = vec3(1.0) - rgb;\n"
+            "    rgb = pow(rgb, vec3(2.2));\n"
+            "    rgb *= tex.a;\n"
+            "    fragColor = vec4(rgb, tex.a);\n"
             "}\n"
         );
 
+        // Pass QByteArray() for vertex → KWin generates the vertex shader from base.vert
         m_xorShader = ShaderManager::instance()->generateCustomShader(
             ShaderTrait::MapTexture,
-            QByteArray(), // vertex: use KWin's built-in
-                                                                      fragmentShader
+            QByteArray(),        // vertex: use KWin's built-in
+                                                                      fragmentSource       // fragment: our custom (no #version!)
         );
 
         if (!m_xorShader) {
+            qCWarning(KWIN_XOR_CURSOR) << "Failed to compile xor shader, falling back to glLogicOp";
             m_xorShaderFailed = true;
         }
     }
@@ -137,39 +129,21 @@ namespace KWin
 
         QRectF cursorDeviceRect(p.x() * scale, p.y() * scale, cursorSize.width() * scale, cursorSize.height() * scale);
         Region cursorRegion = Region(Rect(cursorDeviceRect.toAlignedRect()));
-
-        // Repaint the cursor region so the background is fresh
         effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 
-        // Try the shader-based invert path
-        bool useShader = false;
-        GLTexture *screenTexture = renderTarget.texture();
+        ensureXorShader();
 
-        if (screenTexture) {
-            ensureXorShader();
-            useShader = (m_xorShader != nullptr);
-        }
-
-        if (useShader) {
-            auto *shader = m_xorShader.get();
-            ShaderManager::instance()->pushShader(shader);
-
-            glActiveTexture(GL_TEXTURE1);
-            screenTexture->bind();
-            shader->setUniform("screenSampler", 1);
-            glActiveTexture(GL_TEXTURE0);
+        if (m_xorShader) {
+            // Shader-based invert path
+            ShaderManager::instance()->pushShader(m_xorShader.get());
 
             QMatrix4x4 mvp = viewport.projectionMatrix();
             mvp.translate(p.x() * scale, p.y() * scale);
-            shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
+            m_xorShader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
 
             cursorTexture->render(cursorSize * scale);
 
             ShaderManager::instance()->popShader();
-
-            glActiveTexture(GL_TEXTURE1);
-            screenTexture->unbind();
-            glActiveTexture(GL_TEXTURE0);
         } else {
             // Fallback: legacy glLogicOp path
             auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture | ShaderTrait::TransformColorspace);
