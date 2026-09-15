@@ -3,15 +3,17 @@
 
     SPDX-License-Identifier: GPL-2.0-or-later
 */
-
 #pragma once
-
+#include "core/colorspace.h"
 #include "effect/effect.h"
 
 namespace KWin
 {
 
+class GLFramebuffer;
 class GLTexture;
+class GLVertexBuffer;
+class GLShader;
 
 class XorCursorEffect : public Effect
 {
@@ -21,28 +23,21 @@ public:
     XorCursorEffect();
     ~XorCursorEffect() override;
 
-    void paintScreen(const RenderTarget &renderTarget,
-                     const RenderViewport &viewport,
-                     int mask,
-                     const Region &deviceRegion,
-                     LogicalOutput *screen) override;
+    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen) override;
     bool isActive() const override;
-
 private Q_SLOTS:
     void slotMouseChanged(const QPointF &pos, const QPointF &old);
-    void slotCursorShapeChanged();
+    void markCursorTextureDirty();
 
 private:
     void showCursor();
     void hideCursor();
     GLTexture *ensureCursorTexture();
-    void updateCursorGeometry();
-    QRect cursorRect() const;
 
     std::unique_ptr<GLTexture> m_cursorTexture;
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
-    QRect m_cursorRect;
+    QPoint m_cursorPoint;
 };
 
 } // namespace KWin
