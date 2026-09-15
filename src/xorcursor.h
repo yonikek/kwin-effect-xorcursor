@@ -30,10 +30,11 @@ namespace KWin
         void hideCursor();
         GLTexture *ensureCursorTexture();
         void markCursorTextureDirty();
-        void ensureXorShader(); // New method
+        void ensureXorShader();
 
         std::unique_ptr<GLTexture> m_cursorTexture;
-        std::unique_ptr<GLShader> m_xorShader; // New member
+        std::unique_ptr<GLTexture> m_cursorBgTexture; // Temporary texture to avoid feedback loop
+        std::unique_ptr<GLShader> m_xorShader;
         bool m_cursorTextureDirty = false;
         bool m_isMouseHidden = false;
         QRect m_lastCursorRect;

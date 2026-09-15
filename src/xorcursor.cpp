@@ -5,6 +5,9 @@
 #include "opengl/glutils.h"
 #include "opengl/glshader.h"
 #include "opengl/glshadermanager.h"
+#include <QLoggingCategory>
+
+Q_LOGGING_CATEGORY(KWIN_XOR_CURSOR, "kwin_effect_xorcursor", QtWarningMsg)
 
 namespace KWin
 {
@@ -67,7 +70,6 @@ namespace KWin
         }
     }
 
-    // New method to initialize the custom shader
     void XorCursorEffect::ensureXorShader()
     {
         if (m_xorShader) return;
@@ -86,18 +88,14 @@ namespace KWin
 
     const QString fragmentShader = R"(
         #version 140
-        uniform sampler2D cursorSampler;
+        uniform sampler2D sampler;
         uniform sampler2D screenSampler;
-        uniform vec2 screenSize;
         in vec2 texcoord0;
         out vec4 fragColor;
 
         void main() {
-            vec4 cursor = texture(cursorSampler, texcoord0);
-
-            // Sample the screen background at the fragment's device coordinates
-            vec2 screenTexcoord = gl_FragCoord.xy / screenSize;
-            vec4 screen = texture(screenSampler, screenTexcoord);
+            vec4 cursor = texture(sampler, texcoord0);
+            vec4 screen = texture(screenSampler, texcoord0);
 
             vec3 originalScreen = screen.rgb;
 
@@ -112,13 +110,17 @@ namespace KWin
             vec3 finalColor = mix(originalScreen, screenRgb, cursor.a);
             fragColor = vec4(finalColor, 1.0);
         }
-        )";
+    )";
 
     m_xorShader = ShaderManager::instance()->generateCustomShader(
         ShaderTrait::MapTexture,
         vertexShader.toUtf8(),
                                                                   fragmentShader.toUtf8()
     );
+
+    if (!m_xorShader) {
+        qCWarning(KWIN_XOR_CURSOR) << "Failed to compile XOR cursor shader!";
+    }
     }
 
     void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
@@ -138,34 +140,74 @@ namespace KWin
         m_lastCursorRect = QRectF(p, cursorSize).toAlignedRect();
         const auto scale = viewport.scale();
 
+        QSize cursorDeviceSize = (cursorSize * scale).toSize();
+        if (cursorDeviceSize.isEmpty()) {
+            return;
+        }
+
         QRectF cursorDeviceRect(p.x() * scale, p.y() * scale, cursorSize.width() * scale, cursorSize.height() * scale);
         Region cursorRegion = Region(Rect(cursorDeviceRect.toAlignedRect()));
         effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 
-        // Check if we can access the screen texture (required for the shader mechanism)
         GLTexture *screenTexture = renderTarget.texture();
         bool useShader = (screenTexture != nullptr);
 
-        GLShader *shader = nullptr;
         if (useShader) {
             ensureXorShader();
+            if (!m_xorShader) {
+                qCWarning(KWIN_XOR_CURSOR) << "Shader failed to compile, falling back to glLogicOp";
+                useShader = false;
+            }
+        }
+
+        if (useShader) {
+            // Create/resize background texture to match cursor size
+            if (!m_cursorBgTexture || m_cursorBgTexture->size() != cursorDeviceSize) {
+                m_cursorBgTexture = std::make_unique<GLTexture>(GL_RGBA8, cursorDeviceSize, GL_RGBA);
+                m_cursorBgTexture->setFilter(GL_LINEAR);
+                m_cursorBgTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+            }
+
+            // Copy the background from the framebuffer to avoid sampling the active render target (feedback loop)
+            m_cursorBgTexture->bind();
+            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                                p.x() * scale, p.y() * scale,
+                                cursorDeviceSize.width(), cursorDeviceSize.height());
+            GLenum err = glGetError();
+            m_cursorBgTexture->unbind();
+
+            if (err != GL_NO_ERROR) {
+                qCWarning(KWIN_XOR_CURSOR) << "glCopyTexSubImage2D failed with error" << err << ", falling back";
+                useShader = false;
+            }
+        }
+
+        GLShader *shader = nullptr;
+        if (useShader) {
             shader = m_xorShader.get();
             ShaderManager::instance()->pushShader(shader);
 
-            // Bind screen texture to unit 1
             glActiveTexture(GL_TEXTURE1);
-            screenTexture->bind();
+            m_cursorBgTexture->bind();
             shader->setUniform("screenSampler", 1);
-            shader->setUniform("screenSize", QVector2D(renderTarget.size().width(), renderTarget.size().height()));
+            shader->setUniform("sampler", 0);
 
             glActiveTexture(GL_TEXTURE0);
         } else {
-            // Fallback to legacy logic op if texture is unavailable (e.g. direct scanout)
             auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture | ShaderTrait::TransformColorspace);
+            if (!s) {
+                qCWarning(KWIN_XOR_CURSOR) << "Failed to push fallback shader!";
+                return;
+            }
             shader = s;
             s->setColorspaceUniforms(ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
             glEnable(GL_COLOR_LOGIC_OP);
             glLogicOp(GL_XOR);
+        }
+
+        if (!shader) {
+            qCWarning(KWIN_XOR_CURSOR) << "Shader pointer is null after setup!";
+            return;
         }
 
         QMatrix4x4 mvp = viewport.projectionMatrix();
@@ -178,7 +220,7 @@ namespace KWin
 
         if (useShader) {
             glActiveTexture(GL_TEXTURE1);
-            screenTexture->unbind();
+            m_cursorBgTexture->unbind();
             glActiveTexture(GL_TEXTURE0);
         } else {
             glDisable(GL_COLOR_LOGIC_OP);
