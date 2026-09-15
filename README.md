@@ -1,17 +1,29 @@
-# kwin-effect-xorcursor
+# KWin XOR cursor refactor
 
-XOR cursor effect for KDE Plasma
+This is a proposed refactor for `yonikek/kwin-effect-xorcursor` on the
+`repaint-optimisation` branch.
 
-![IMG_20250527_210735](https://github.com/user-attachments/assets/3a3eeba0-4e56-4925-897c-e3607c03f8bf)
+## What changes
 
-## Note
+- Removes `GL_COLOR_LOGIC_OP` / `glLogicOp(GL_XOR)` from the cursor paint path.
+- Keeps the existing repaint optimization (old cursor rect + new cursor rect).
+- Paints the affected cursor region once, snapshots that region into a small
+  reusable framebuffer texture, and applies a shader pass over the snapshot.
+- Uses KWin's color-management helpers and the same gamma-2.2 inversion math
+  used by the built-in accessibility `InvertEffect`.
+- Uses the cursor alpha as the inversion mask, preserving antialiased cursor
+  edges instead of relying on integer framebuffer XOR.
 
-Use a white cursor theme for the best effect.
+## Files
 
-## Build
+- `xorcursor.cpp` — proposed implementation
+- `xorcursor.h` — matching declarations
+- `0001-use-color-managed-inversion-instead-of-gl-logic-op.patch` — unified diff
 
-```bash
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
-cmake --build build
-sudo cmake --install build
-```
+## Notes
+
+The patch has not been compiled in this environment because the KWin/Qt/KF6
+build dependencies are not installed here. The most important integration point
+to verify in a real KWin development environment is the custom shader's
+`colormanagement.glsl` include, since that is resolved by KWin's shader
+preprocessor.
