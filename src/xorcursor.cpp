@@ -216,7 +216,10 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
      * "position * scale" calculation.
      */
     const Region cursorRenderRegion =
-        Region(viewport.mapToRenderTarget(logicalCursorRect)) & deviceRegion;
+        Region(viewport.mapToRenderTarget(KWin::Rect(logicalCursorRect.x(),
+                                                       logicalCursorRect.y(),
+                                                       logicalCursorRect.width(),
+                                                       logicalCursorRect.height()))) & deviceRegion;
 
     if (cursorRenderRegion.isEmpty()) {
         return;
