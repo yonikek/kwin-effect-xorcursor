@@ -1,9 +1,3 @@
-/*
-    SPDX-FileCopyrightText: 2025 Jin Liu <m.liu.jin@gmail.com>
-
-    SPDX-License-Identifier: GPL-2.0-or-later
-*/
-
 #pragma once
 
 #include "core/colorspace.h"
@@ -12,36 +6,37 @@
 namespace KWin
 {
 
-class GLFramebuffer;
-class GLTexture;
-class GLVertexBuffer;
-class GLShader;
+    class GLFramebuffer;
+    class GLTexture;
+    class GLVertexBuffer;
+    class GLShader;
 
-class XorCursorEffect : public Effect
-{
-    Q_OBJECT
+    class XorCursorEffect : public Effect
+    {
+        Q_OBJECT
 
-public:
-    XorCursorEffect();
-    ~XorCursorEffect() override;
+    public:
+        XorCursorEffect();
+        ~XorCursorEffect() override;
 
-    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen) override;
-    bool isActive() const override;
+        void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen) override;
+        bool isActive() const override;
 
-private Q_SLOTS:
-    void slotMouseChanged(const QPointF &pos, const QPointF &old);
+    private Q_SLOTS:
+        void slotMouseChanged(const QPointF &pos, const QPointF &old);
 
-private:
-    void showCursor();
-    void hideCursor();
-    GLTexture *ensureCursorTexture();
-    void markCursorTextureDirty();
+    private:
+        void showCursor();
+        void hideCursor();
+        GLTexture *ensureCursorTexture();
+        void markCursorTextureDirty();
+        void ensureXorShader(); // New method
 
-    std::unique_ptr<GLTexture> m_cursorTexture;
-    bool m_cursorTextureDirty = false;
-    bool m_isMouseHidden = false;
-    // Tracks the exact logical bounding box of the cursor from the previous frame
-    QRect m_lastCursorRect;
-};
+        std::unique_ptr<GLTexture> m_cursorTexture;
+        std::unique_ptr<GLShader> m_xorShader; // New member
+        bool m_cursorTextureDirty = false;
+        bool m_isMouseHidden = false;
+        QRect m_lastCursorRect;
+    };
 
 } // namespace KWin
