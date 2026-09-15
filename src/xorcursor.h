@@ -6,16 +6,12 @@
 
 #pragma once
 
-#include "core/colorspace.h"
 #include "effect/effect.h"
 
 namespace KWin
 {
 
-class GLFramebuffer;
 class GLTexture;
-class GLVertexBuffer;
-class GLShader;
 
 class XorCursorEffect : public Effect
 {
@@ -30,16 +26,19 @@ public:
 
 private Q_SLOTS:
     void slotMouseChanged(const QPointF &pos, const QPointF &old);
+    void slotCursorShapeChanged();
 
 private:
     void showCursor();
     void hideCursor();
     GLTexture *ensureCursorTexture();
-    void markCursorTextureDirty();
+    void updateCursorGeometry();
+    QRect cursorRect() const;
 
     std::unique_ptr<GLTexture> m_cursorTexture;
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
+    QRect m_cursorRect;
 };
 
 } // namespace KWin
