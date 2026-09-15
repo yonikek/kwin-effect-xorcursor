@@ -5,6 +5,7 @@
 #include "opengl/glutils.h"
 #include "opengl/glshader.h"
 #include "opengl/glshadermanager.h"
+#include "opengl/glframebuffer.h"
 #include <QLoggingCategory>
 
 Q_LOGGING_CATEGORY(KWIN_XOR_CURSOR, "kwin_effect_xorcursor", QtWarningMsg)
@@ -74,47 +75,35 @@ namespace KWin
     {
         if (m_xorShader) return;
 
-        const QString vertexShader = R"(
-        #version 140
-        uniform mat4 modelViewProjectionMatrix;
-        in vec4 vertex;
-        in vec2 texcoord;
-        out vec2 texcoord0;
-        void main() {
-            gl_Position = modelViewProjectionMatrix * vertex;
-            texcoord0 = texcoord;
-        }
-    )";
-
-    const QString fragmentShader = R"(
+        // Fragment shader only: KWin will automatically prepend base.vert
+        // which correctly binds "position" and "texcoord" attributes.
+        const QString fragmentShader = R"(
         #version 140
         uniform sampler2D sampler;
-        uniform sampler2D screenSampler;
+        uniform sampler2D bgSampler;
         in vec2 texcoord0;
         out vec4 fragColor;
 
         void main() {
             vec4 cursor = texture(sampler, texcoord0);
-            vec4 screen = texture(screenSampler, texcoord0);
-
-            vec3 originalScreen = screen.rgb;
+            vec4 bg = texture(bgSampler, texcoord0);
 
             // Plasma invert mechanism: 1.0 - rgb in gamma 2.2 space
-            vec3 screenRgb = screen.rgb / max(0.001, screen.a);
-            screenRgb = pow(screenRgb, vec3(1.0 / 2.2)); // Linear to Gamma 2.2
-            screenRgb = vec3(1.0) - screenRgb;          // Invert
-            screenRgb = pow(screenRgb, vec3(2.2));      // Gamma 2.2 to Linear
-            screenRgb *= screen.a;
+            vec3 bgRgb = bg.rgb / max(0.001, bg.a);
+            bgRgb = pow(bgRgb, vec3(1.0 / 2.2)); // Linear to Gamma 2.2
+            bgRgb = vec3(1.0) - bgRgb;          // Invert
+            bgRgb = pow(bgRgb, vec3(2.2));      // Gamma 2.2 to Linear
+            bgRgb *= bg.a;
 
             // XOR logic: If cursor is opaque, show inverted background; otherwise show original background
-            vec3 finalColor = mix(originalScreen, screenRgb, cursor.a);
+            vec3 finalColor = mix(bg.rgb, bgRgb, cursor.a);
             fragColor = vec4(finalColor, 1.0);
         }
     )";
 
     m_xorShader = ShaderManager::instance()->generateCustomShader(
         ShaderTrait::MapTexture,
-        vertexShader.toUtf8(),
+        QByteArray(), // Use KWin's default base.vert
                                                                   fragmentShader.toUtf8()
     );
 
@@ -161,24 +150,27 @@ namespace KWin
         }
 
         if (useShader) {
-            // Create/resize background texture to match cursor size
+            // Allocate background texture using KWin's API
             if (!m_cursorBgTexture || m_cursorBgTexture->size() != cursorDeviceSize) {
-                m_cursorBgTexture = std::make_unique<GLTexture>(GL_RGBA8, cursorDeviceSize, GL_RGBA);
-                m_cursorBgTexture->setFilter(GL_LINEAR);
-                m_cursorBgTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+                m_cursorBgTexture = GLTexture::allocate(GL_RGBA8, cursorDeviceSize);
+                if (!m_cursorBgTexture) {
+                    qCWarning(KWIN_XOR_CURSOR) << "Failed to allocate background texture, falling back";
+                    useShader = false;
+                } else {
+                    m_cursorBgTexture->setFilter(GL_LINEAR);
+                    m_cursorBgTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+                }
             }
 
-            // Copy the background from the framebuffer to avoid sampling the active render target (feedback loop)
-            m_cursorBgTexture->bind();
-            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                                p.x() * scale, p.y() * scale,
-                                cursorDeviceSize.width(), cursorDeviceSize.height());
-            GLenum err = glGetError();
-            m_cursorBgTexture->unbind();
-
-            if (err != GL_NO_ERROR) {
-                qCWarning(KWIN_XOR_CURSOR) << "glCopyTexSubImage2D failed with error" << err << ", falling back";
-                useShader = false;
+            if (useShader) {
+                // Safely copy background pixels using KWin's blit API
+                // This handles all rotations, scaling, and Y-inversions automatically
+                GLFramebuffer tempFbo(m_cursorBgTexture.get());
+                bool blitSuccess = tempFbo.blitFromRenderTarget(renderTarget, viewport, Rect(cursorDeviceRect), Rect(QPoint(0,0), cursorDeviceSize));
+                if (!blitSuccess) {
+                    qCWarning(KWIN_XOR_CURSOR) << "Blit failed, falling back to glLogicOp";
+                    useShader = false;
+                }
             }
         }
 
@@ -189,8 +181,7 @@ namespace KWin
 
             glActiveTexture(GL_TEXTURE1);
             m_cursorBgTexture->bind();
-            shader->setUniform("screenSampler", 1);
-            shader->setUniform("sampler", 0);
+            shader->setUniform("bgSampler", 1);
 
             glActiveTexture(GL_TEXTURE0);
         } else {
@@ -203,11 +194,6 @@ namespace KWin
             s->setColorspaceUniforms(ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
             glEnable(GL_COLOR_LOGIC_OP);
             glLogicOp(GL_XOR);
-        }
-
-        if (!shader) {
-            qCWarning(KWIN_XOR_CURSOR) << "Shader pointer is null after setup!";
-            return;
         }
 
         QMatrix4x4 mvp = viewport.projectionMatrix();

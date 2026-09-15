@@ -33,7 +33,7 @@ namespace KWin
         void ensureXorShader();
 
         std::unique_ptr<GLTexture> m_cursorTexture;
-        std::unique_ptr<GLTexture> m_cursorBgTexture; // Temporary texture to avoid feedback loop
+        std::unique_ptr<GLTexture> m_cursorBgTexture;
         std::unique_ptr<GLShader> m_xorShader;
         bool m_cursorTextureDirty = false;
         bool m_isMouseHidden = false;
