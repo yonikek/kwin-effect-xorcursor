@@ -1,3 +1,9 @@
+/*
+ S PDX-FileCopyri*ghtText: 2025 Jin Liu <m.liu.jin@gmail.com>
+
+ SPDX-License-Identifier: GPL-2.0-or-later
+ */
+
 #pragma once
 
 #include "core/colorspace.h"
@@ -33,10 +39,10 @@ namespace KWin
         void ensureXorShader();
 
         std::unique_ptr<GLTexture> m_cursorTexture;
-        std::unique_ptr<GLTexture> m_cursorBgTexture;
         std::unique_ptr<GLShader> m_xorShader;
         bool m_cursorTextureDirty = false;
         bool m_isMouseHidden = false;
+        bool m_xorShaderFailed = false;
         QRect m_lastCursorRect;
     };
 
