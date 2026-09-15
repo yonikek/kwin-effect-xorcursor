@@ -171,7 +171,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     // the viewport, including the output transform, before intersecting it
     // with the actual damage. This prevents XORing pixels outside the current
     // paint region.
-    const Region cursorRenderRegion = viewport.mapToRenderTarget(logicalCursorRect) & deviceRegion;
+    const Region cursorRenderRegion = viewport.mapToRenderTarget(Rect(logicalCursorRect)) & deviceRegion;
     if (cursorRenderRegion.isEmpty()) {
         return;
     }
@@ -197,7 +197,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
 
     auto shader = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture);
     QMatrix4x4 mvp = viewport.projectionMatrix();
-    mvp.translate(devicePosition);
+    mvp.translate(devicePosition.x(), devicePosition.y());
     shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
     cursorTexture->render(cursorRenderRegion, deviceSize, true);
     ShaderManager::instance()->popShader();
