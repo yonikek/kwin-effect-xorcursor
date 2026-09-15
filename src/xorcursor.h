@@ -1,47 +1,80 @@
-/*
-    SPDX-FileCopyrightText: 2025 Jin Liu <m.liu.jin@gmail.com>
+#ifndef KWIN_XORCURSOR_H
+#define KWIN_XORCURSOR_H
 
-    SPDX-License-Identifier: GPL-2.0-or-later
-*/
+#include <kwineffects.h>
+#include <kwinglutils.h>
 
-#pragma once
+#include <QImage>
+#include <QPoint>
+#include <QRect>
+#include <QScopedPointer>
+#include <QTimer>
 
-#include "core/colorspace.h"
-#include "effect/effect.h"
+#include <memory>
 
-namespace KWin
-{
+namespace KWin {
 
-class GLFramebuffer;
-class GLTexture;
-class GLVertexBuffer;
-class GLShader;
+    class GLShader;
+    class GLTexture;
+    class GLRenderTarget;
 
-class XorCursorEffect : public Effect
-{
-    Q_OBJECT
+    class XorCursorEffect : public Effect
+    {
+        Q_OBJECT
+        Q_PROPERTY(bool enabled READ isEnabled WRITE setEnabled)
 
-public:
-    XorCursorEffect();
-    ~XorCursorEffect() override;
+    public:
+        XorCursorEffect();
+        ~XorCursorEffect() override;
 
-    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen) override;
-    bool isActive() const override;
+        void reconfigure(ReconfigureFlags flags) override;
+        void prePaintScreen(ScreenPrePaintData &data) override;
+        void paintScreen(const RenderTarget &renderTarget,
+                         const RenderViewport &viewport,
+                         int mask,
+                         const QRegion &region,
+                         ScreenPaintData &data) override;
+                         void postPaintScreen() override;
+                         bool isActive() const override;
 
-private Q_SLOTS:
-    void slotMouseChanged(const QPointF &pos, const QPointF &old);
+                         static bool supported();
 
-private:
-    void showCursor();
-    void hideCursor();
-    GLTexture *ensureCursorTexture();
-    void markCursorTextureDirty();
+                         bool isEnabled() const;
+                         void setEnabled(bool enabled);
 
-    std::unique_ptr<GLTexture> m_cursorTexture;
-    bool m_cursorTextureDirty = false;
-    bool m_isMouseHidden = false;
-    // Tracks the exact logical bounding box of the cursor from the previous frame
-    QRect m_lastCursorRect;
-};
+    private Q_SLOTS:
+        void slotMouseChanged(const QPointF &pos, const QPointF &oldpos,
+                              Qt::MouseButtons buttons, Qt::MouseButtons oldbuttons,
+                              Qt::KeyboardModifiers modifiers,
+                              Qt::KeyboardModifiers oldmodifiers);
+        void markCursorTextureDirty();
+        void hideCursor();
+        void showCursor();
+
+    private:
+        void loadShader();
+        void updateCursorTexture();
+        bool ensureRenderTarget(const QSize &size);
+        void applyXorShader(const QRect &deviceRect,
+                            const QRect &cursorRect,
+                            const QPointF &cursorHotspot);
+
+        bool m_enabled = false;
+        bool m_isMouseHidden = false;
+
+        std::unique_ptr<GLTexture> m_cursorTexture;
+        std::unique_ptr<GLTexture> m_backgroundTexture;
+        std::unique_ptr<GLRenderTarget> m_renderTarget;
+        GLShader *m_xorShader = nullptr;
+
+        QSize m_renderTargetSize;
+        QRect m_lastCursorRect;          // logical coordinates
+        qreal m_lastScale = 1.0;         // device pixel ratio of the screen
+        QImage m_cursorImage;
+
+        QTimer m_repaintTimer;
+    };
 
 } // namespace KWin
+
+#endif // KWIN_XORCURSOR_H

@@ -20,6 +20,13 @@ include(KDEInstallDirs)
 include(KDECMakeSettings)
 include(KDECompilerSettings NO_POLICY_SCOPE)
 
+qt_add_resources(xorcursor shaders
+    PREFIX "/effects/xorcursor"
+    FILES
+        shaders/xorcursor.frag
+        shaders/xorcursor_core.frag   # optional GLES variant
+)
+
 find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS
     Core
     Gui
