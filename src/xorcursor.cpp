@@ -193,59 +193,26 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
         int(std::floor(p.x() * scale)),
         int(std::floor(p.y() * scale)));
     const QRect cursorRect(cursorDevicePos, cursorDeviceSize);
-    const Region cursorRegion{Rect(cursorRect)};
-
-    // Paint the cursor's underlying region first, then replace it with the
-    // color-managed inverted version. This keeps the repaint optimization
-    // while avoiding GL_COLOR_LOGIC_OP / bitwise framebuffer XOR.
-    effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
     if (!ensureBackgroundBuffer(cursorRect.size())) {
         return;
     }
 
-    // Prefer a direct texture copy for the common untransformed framebuffer
-    // case. This avoids the extra destination-FBO blit involved in
-    // GLFramebuffer::blitFromRenderTarget(). Fall back to KWin's blit helper
-    // for transformed targets and non-FBO render targets.
-    bool copied = false;
-    const Rect sourceRect = viewport.mapToRenderTarget(Rect(cursorLogicalRect));
-    GLFramebuffer *currentFramebuffer = GLFramebuffer::currentFramebuffer();
-    if (renderTarget.framebuffer() == currentFramebuffer
-        && viewport.transform() == OutputTransform::Normal
-        && renderTarget.size() == viewport.deviceSize()
-        && sourceRect.size() == cursorRect.size()
-        && sourceRect.x() >= 0
-        && sourceRect.y() >= 0
-        && sourceRect.right() <= renderTarget.size().width() - 1
-        && sourceRect.bottom() <= renderTarget.size().height() - 1) {
-        glActiveTexture(GL_TEXTURE0);
-        m_backgroundTexture->bind();
+    // Render the same small logical region directly into the persistent scratch
+    // framebuffer. This is the key performance change: it avoids copying pixels
+    // out of the live render target, which can introduce a GPU synchronization
+    // point on some drivers.
+    //
+    // The scratch viewport makes the cursor rectangle the entire render target,
+    // while preserving the output scale. The scratch target uses the same color
+    // description as the real render target, so the inversion shader can use the
+    // same color-management uniforms as KWin's accessibility InvertEffect.
+    RenderTarget scratchTarget(m_backgroundFramebuffer.get(), renderTarget.colorDescription());
+    RenderViewport scratchViewport(RectF(cursorLogicalRect), scale, scratchTarget, QPoint());
+    const Region scratchRegion{Rect(QPoint(), cursorRect.size())};
 
-        const int sourceY = renderTarget.size().height() - (sourceRect.y() + sourceRect.height());
-        glCopyTexSubImage2D(GL_TEXTURE_2D,
-                            0,
-                            0,
-                            0,
-                            sourceRect.x(),
-                            sourceY,
-                            sourceRect.width(),
-                            sourceRect.height());
-
-        m_backgroundTexture->unbind();
-        copied = true;
-    }
-
-    if (!copied) {
-        // Destination is always the top-left portion of the persistent scratch
-        // texture. The texture can be larger than the current cursor and the
-        // shader samples only this source rectangle below.
-        if (!m_backgroundFramebuffer->blitFromRenderTarget(renderTarget,
-                                                            viewport,
-                                                            cursorLogicalRect,
-                                                            Rect(QPoint(), cursorRect.size()))) {
-            return;
-        }
-    }
+    GLFramebuffer::pushFramebuffer(m_backgroundFramebuffer.get());
+    effects->paintScreen(scratchTarget, scratchViewport, mask, scratchRegion, screen);
+    GLFramebuffer::popFramebuffer();
 
     GLShader *shader = ensureInvertShader();
     if (!shader) {
