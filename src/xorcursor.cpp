@@ -48,7 +48,7 @@ void main()
 
     vec4 normal = nitsToDestinationEncoding(scene);
     vec4 inverted = nitsToDestinationEncoding(encoded);
-    float mask = texture(cursorSampler, texcoord0).a;
+    float mask = texture(cursorSampler, vec2(texcoord0.x, 1.0 - texcoord0.y)).a;
     fragColor = mix(normal, inverted, mask);
 }
 )SHADER";
