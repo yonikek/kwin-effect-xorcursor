@@ -54,13 +54,16 @@ void main()
     // with the inverse Y so the mask lines up with the rendered cursor.
     float mask = texture(cursorSampler, vec2(texcoord0.x, 1.0 - texcoord0.y)).a;
 
-    // The effect renders the inverted cursor rectangle over the already-painted
-    // screen. Do not output the unmodified scene outside the cursor: doing so
-    // causes the entire offscreen rectangle to be blended back over the screen
-    // and can expose a rectangular border due to tiny differences between the
-    // offscreen and onscreen render paths. KWin uses premultiplied-alpha blending,
-    // so output only the inverted colour multiplied by the cursor alpha.
-    fragColor = vec4(inverted.rgb * mask, inverted.a * mask);
+    // The scratch target covers a rectangle, but only the cursor shape should
+    // affect the real render target. Discard the transparent part of the cursor
+    // so the scratch rectangle itself can never overwrite the screen. For the
+    // actual cursor pixels, preserve the rendered scene and interpolate toward
+    // the inverted version using the cursor alpha. This also avoids depending
+    // on the caller having a particular blend state.
+    if (mask <= 0.001) {
+        discard;
+    }
+    fragColor = mix(scene, inverted, mask);
 }
 )SHADER";
 
