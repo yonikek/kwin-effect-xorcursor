@@ -12,6 +12,8 @@
 #include "opengl/gltexture.h"
 #include "opengl/glutils.h"
 
+#include <cmath>
+
 namespace KWin
 {
 
@@ -37,9 +39,8 @@ void main()
     scene = sourceEncodingToNitsInDestinationColorspace(scene);
     scene = adjustSaturation(scene);
 
-    // This is the same inversion transform used by KWin's accessibility
-    // InvertEffect: do the inversion in gamma 2.2 space and convert back to
-    // the destination colorspace afterwards.
+    // Keep this in sync with KWin's accessibility InvertEffect: perform the
+    // inversion in gamma 2.2 encoding space and convert back afterwards.
     vec4 encoded = nitsToEncoding(scene, gamma22_EOTF, 0.0, destinationReferenceLuminance);
     encoded.rgb /= max(0.001, encoded.a);
     encoded.rgb = vec3(1.0) - encoded.rgb;
@@ -48,6 +49,10 @@ void main()
 
     vec4 normal = nitsToDestinationEncoding(scene);
     vec4 inverted = nitsToDestinationEncoding(encoded);
+
+    // The cursor image is uploaded in Qt's top-left-origin convention, while
+    // KWin's GLTexture render path flips Y for OpenGL. Sample the cursor mask
+    // with the inverse Y so the mask lines up with the rendered cursor.
     float mask = texture(cursorSampler, vec2(texcoord0.x, 1.0 - texcoord0.y)).a;
     fragColor = mix(normal, inverted, mask);
 }
@@ -122,11 +127,18 @@ bool XorCursorEffect::ensureBackgroundBuffer(const QSize &size)
     if (size.isEmpty()) {
         return false;
     }
-    if (m_backgroundTexture && m_backgroundTexture->size() == size && m_backgroundFramebuffer) {
+
+    // Keep the allocation alive when the cursor moves or when a cursor shape
+    // becomes smaller. Reallocate only when we actually need more storage.
+    if (m_backgroundTexture && m_backgroundFramebuffer
+        && m_backgroundTexture->size().width() >= size.width()
+        && m_backgroundTexture->size().height() >= size.height()) {
         return true;
     }
 
     m_backgroundFramebuffer.reset();
+    m_backgroundTexture.reset();
+
     m_backgroundTexture = GLTexture::allocate(GL_RGBA8, size);
     if (!m_backgroundTexture) {
         return false;
@@ -164,15 +176,23 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     const auto cursor = effects->cursorImage();
     const QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
     const QPointF p = effects->cursorPos() - cursor.hotSpot();
+
     m_lastCursorRect = QRectF(p, cursorSize).toAlignedRect();
 
     const qreal scale = viewport.scale();
+
+    // The logical rectangle is used only for mapping the source region through
+    // RenderViewport. The device rectangle deliberately gets a size which is
+    // independent of the cursor position, so moving over fractional pixels
+    // cannot cause the scratch texture to be resized every frame.
     const QRect cursorLogicalRect = QRectF(p, cursorSize).toAlignedRect();
-    const QRect cursorRect = QRectF(p.x() * scale,
-                                    p.y() * scale,
-                                    cursorSize.width() * scale,
-                                    cursorSize.height() * scale)
-                                .toAlignedRect();
+    const QSize cursorDeviceSize(
+        std::max(1, int(std::ceil(cursorSize.width() * scale))),
+        std::max(1, int(std::ceil(cursorSize.height() * scale))));
+    const QPoint cursorDevicePos(
+        int(std::floor(p.x() * scale)),
+        int(std::floor(p.y() * scale)));
+    const QRect cursorRect(cursorDevicePos, cursorDeviceSize);
     const Region cursorRegion{Rect(cursorRect)};
 
     // Paint the cursor's underlying region first, then replace it with the
@@ -183,11 +203,48 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
         return;
     }
 
-    // Snapshot the already-composited cursor rectangle before sampling it in
-    // the inversion shader. Sampling the current framebuffer directly would
-    // create a read/write feedback loop.
-    if (!m_backgroundFramebuffer->blitFromRenderTarget(renderTarget, viewport, Rect(cursorLogicalRect), Rect(QPoint(), cursorRect.size()))) {
-        return;
+    // Prefer a direct texture copy for the common untransformed framebuffer
+    // case. This avoids the extra destination-FBO blit involved in
+    // GLFramebuffer::blitFromRenderTarget(). Fall back to KWin's blit helper
+    // for transformed targets and non-FBO render targets.
+    bool copied = false;
+    const Rect sourceRect = viewport.mapToRenderTarget(cursorLogicalRect);
+    GLFramebuffer *currentFramebuffer = GLFramebuffer::currentFramebuffer();
+    if (renderTarget.framebuffer() == currentFramebuffer
+        && viewport.transform() == OutputTransform::Normal
+        && renderTarget.size() == viewport.deviceSize()
+        && sourceRect.size() == cursorRect.size()
+        && sourceRect.x() >= 0
+        && sourceRect.y() >= 0
+        && sourceRect.right() <= renderTarget.size().width() - 1
+        && sourceRect.bottom() <= renderTarget.size().height() - 1) {
+        glActiveTexture(GL_TEXTURE0);
+        m_backgroundTexture->bind();
+
+        const int sourceY = renderTarget.size().height() - (sourceRect.y() + sourceRect.height());
+        glCopyTexSubImage2D(GL_TEXTURE_2D,
+                            0,
+                            0,
+                            0,
+                            sourceRect.x(),
+                            sourceY,
+                            sourceRect.width(),
+                            sourceRect.height());
+
+        m_backgroundTexture->unbind();
+        copied = true;
+    }
+
+    if (!copied) {
+        // Destination is always the top-left portion of the persistent scratch
+        // texture. The texture can be larger than the current cursor and the
+        // shader samples only this source rectangle below.
+        if (!m_backgroundFramebuffer->blitFromRenderTarget(renderTarget,
+                                                            viewport,
+                                                            cursorLogicalRect,
+                                                            Rect(QPoint(), cursorRect.size()))) {
+            return;
+        }
     }
 
     GLShader *shader = ensureInvertShader();
@@ -210,11 +267,11 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     glActiveTexture(GL_TEXTURE1);
     cursorTexture->bind();
 
-    // GLTexture::render() binds the texture on the currently active unit, so
-    // leave unit 0 active while it draws the snapshot and keep the cursor mask
-    // bound on unit 1.
     glActiveTexture(GL_TEXTURE0);
-    m_backgroundTexture->render(cursorRect.size());
+    // When the persistent scratch texture is larger than the current cursor,
+    // render only the portion containing this frame's copied background.
+    const QRectF source(0, 0, cursorRect.width(), cursorRect.height());
+    m_backgroundTexture->render(source, Region::infinite(), cursorRect.size());
 
     glActiveTexture(GL_TEXTURE1);
     cursorTexture->unbind();
