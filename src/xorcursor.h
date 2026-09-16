@@ -1,14 +1,10 @@
 #ifndef XORCURSOR_H
 #define XORCURSOR_H
 
-#include <kwineffects.h>
+#include <kwin/kwineffects.h>
+#include <kwin/kwinglutils.h>
 #include <QScopedPointer>
 #include <QRect>
-
-namespace KWin {
-    class GLTexture;
-    class GLShader;
-}
 
 class XorCursorEffect : public KWin::Effect
 {
