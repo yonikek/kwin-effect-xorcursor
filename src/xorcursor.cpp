@@ -6,36 +6,77 @@
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
-#include "opengl/glplatform.h"
 #include "opengl/gltexture.h"
 #include "opengl/glutils.h"
 #include "opengl/glvertexbuffer.h"
 
 #include <QImage>
+#include <QOpenGLContext>
 
 namespace KWin {
 
     // ---------------------------------------------------------------------------
-    // XOR fragment shaders.
-    //
-    // `generateCustomShader` replaces the generated fragment shader entirely, so
-    // these sources must be self‑contained.  The generated vertex shader for
-    // ShaderTrait::MapTexture declares:
-    //
-    //     attribute/in  vec4 position;
-    //     attribute/in  vec4 texcoord;
-    //     varying/out   vec2 texcoord0;
-    //
-    // and writes `texcoord0 = texcoord.st;`.  It does NOT use gl_TexCoord, so we
-    // must sample with `texcoord0`.
-    //
-    // The fragment shader itself must declare `uniform sampler2D sampler;` and
-    // `varying/in vec2 texcoord0;` because the generated header is not included
-    // when a custom fragment source is supplied.
-    //
-    // GLSL 1.10 / ES 1.00 variant (used when the context GLSL version < 1.40):
+    // Returns the major/minor GLSL version from the driver, e.g. "1.40" -> (1,40).
+    // Falls back to (1, 10) if the string cannot be parsed.
     // ---------------------------------------------------------------------------
-    static const char kXorShaderSourceLegacy[] = R"(
+    static Version parseGlslVersion()
+    {
+        const auto *versionString = glGetString(GL_SHADING_LANGUAGE_VERSION);
+        if (!versionString) {
+            return Version(1, 10);
+        }
+
+        const QByteArray str = QByteArray::fromRawData(
+            reinterpret_cast<const char *>(versionString),
+                                                       qstrlen(reinterpret_cast<const char *>(versionString)));
+
+        // The string can look like "1.40", "4.60 NVIDIA", "3.00 ES", "OpenGL ES GLSL ES 3.00", etc.
+        // Find the first x.y pattern.
+        const QRegularExpression re(QStringLiteral(R"((\d+)\.(\d+))"));
+    const auto match = re.match(QString::fromLatin1(str));
+    if (!match.hasMatch()) {
+        return Version(1, 10);
+    }
+
+    bool ok = false;
+    const int major = match.captured(1).toInt(&ok);
+    if (!ok) {
+        return Version(1, 10);
+    }
+    const int minor = match.captured(2).toInt(&ok);
+    if (!ok) {
+        return Version(1, 10);
+    }
+
+    return Version(major, minor);
+    }
+
+static bool useModernGlsl()
+{
+    return parseGlslVersion() >= Version(1, 40);
+}
+
+// ---------------------------------------------------------------------------
+// XOR fragment shaders.
+//
+// `generateCustomShader` replaces the generated fragment shader entirely, so
+// these sources must be self-contained. The generated vertex shader for
+// ShaderTrait::MapTexture declares:
+//
+//     attribute/in  vec4 position;
+//     attribute/in  vec4 texcoord;
+//     varying/out   vec2 texcoord0;
+//
+// and writes `texcoord0 = texcoord.st;`. It does NOT use gl_TexCoord, so we
+// must sample with `texcoord0`.
+//
+// The fragment shader must declare `uniform sampler2D sampler;` and the
+// `texcoord0` varying itself, because the generated fragment header is not
+// included when a custom fragment source is supplied.
+// ---------------------------------------------------------------------------
+
+// GLSL 1.10 / ES 1.00 variant (used when the context GLSL version < 1.40)
+static const char kXorShaderSourceLegacy[] = R"(
 uniform sampler2D sampler;
 uniform sampler2D backgroundTexture;
 uniform sampler2D xorLookup;
@@ -61,12 +102,10 @@ void main()
 }
 )";
 
-// ---------------------------------------------------------------------------
-// GLSL 1.40+ / ES 3.00 variant.  KWin's GLShader::prepareSource rewrites
-// "#version 140" to "#version 300 es\n\nprecision highp float;\n" for ES 3.00
-// contexts, so this single source works for both desktop GLSL 1.40+ and
-// GLSL ES 3.00.
-// ---------------------------------------------------------------------------
+// GLSL 1.40+ / ES 3.00 variant.
+// KWin's GLShader::prepareSource rewrites "#version 140" to
+// "#version 300 es\n\nprecision highp float;\n" for ES 3.00 contexts, so this
+// single source works for both desktop GLSL 1.40+ and GLSL ES 3.00.
 static const char kXorShaderSourceModern[] = R"(
 #version 140
 uniform sampler2D sampler;
@@ -159,6 +198,7 @@ void XorCursorEffect::hideCursor()
 
 void XorCursorEffect::createXorLookupTexture()
 {
+    // 256x256 RGBA texture: texel (x, y) = x ^ y in the red channel.
     QImage lookup(256, 256, QImage::Format_RGBA8888);
     for (int a = 0; a < 256; ++a) {
         for (int b = 0; b < 256; ++b) {
@@ -172,7 +212,7 @@ void XorCursorEffect::createXorLookupTexture()
         m_xorLookupTexture->setWrapMode(GL_CLAMP_TO_EDGE);
         m_xorLookupTexture->setFilter(GL_NEAREST);
     } else {
-        qWarning(KWIN_EFFECT_LOG) << "XorCursorEffect: failed to create XOR lookup texture";
+        qCWarning(KWINEFFECTS) << "XorCursorEffect: failed to create XOR lookup texture";
     }
 }
 
@@ -235,8 +275,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
         glActiveTexture(GL_TEXTURE0);
     }
 
-    const bool useModernGLSL = GLPlatform::instance()->glslVersion() >= Version(1, 40);
-    const QByteArray fragmentSource = useModernGLSL
+    const QByteArray fragmentSource = useModernGlsl()
     ? QByteArray(kXorShaderSourceModern)
     : QByteArray(kXorShaderSourceLegacy);
 
@@ -246,7 +285,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
                                                                   fragmentSource);
 
     if (!shader) {
-        qWarning(KWIN_EFFECT_LOG) << "XorCursorEffect: custom shader unavailable";
+        qCWarning(KWINEFFECTS) << "XorCursorEffect: custom shader unavailable";
         return;
     }
 
