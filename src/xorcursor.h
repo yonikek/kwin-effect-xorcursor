@@ -1,47 +1,56 @@
-/*
-    SPDX-FileCopyrightText: 2025 Jin Liu <m.liu.jin@gmail.com>
-
-    SPDX-License-Identifier: GPL-2.0-or-later
-*/
-
+/* SPDX-FileCopyrightText: 2025 Jin Liu
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
 #pragma once
 
 #include "core/colorspace.h"
 #include "effect/effect.h"
 
-namespace KWin
-{
+#include <QImage>
+#include <memory>
 
-class GLFramebuffer;
-class GLTexture;
-class GLVertexBuffer;
-class GLShader;
+namespace KWin {
 
-class XorCursorEffect : public Effect
-{
-    Q_OBJECT
+    class GLFramebuffer;
+    class GLTexture;
+    class GLVertexBuffer;
+    class GLShader;
 
-public:
-    XorCursorEffect();
-    ~XorCursorEffect() override;
+    class XorCursorEffect : public Effect
+    {
+        Q_OBJECT
+    public:
+        XorCursorEffect();
+        ~XorCursorEffect() override;
 
-    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen) override;
-    bool isActive() const override;
+        void paintScreen(const RenderTarget &renderTarget,
+                         const RenderViewport &viewport,
+                         int mask,
+                         const Region &deviceRegion,
+                         LogicalOutput *screen) override;
+                         bool isActive() const override;
 
-private Q_SLOTS:
-    void slotMouseChanged(const QPointF &pos, const QPointF &old);
+    private Q_SLOTS:
+        void slotMouseChanged(const QPointF &pos, const QPointF &old);
 
-private:
-    void showCursor();
-    void hideCursor();
-    GLTexture *ensureCursorTexture();
-    void markCursorTextureDirty();
+    private:
+        void showCursor();
+        void hideCursor();
+        GLTexture *ensureCursorTexture();
+        void markCursorTextureDirty();
 
-    std::unique_ptr<GLTexture> m_cursorTexture;
-    bool m_cursorTextureDirty = false;
-    bool m_isMouseHidden = false;
-    // Tracks the exact logical bounding box of the cursor from the previous frame
-    QRect m_lastCursorRect;
-};
+        void ensureBackgroundTexture(const QSize &deviceSize);
+        void createXorLookupTexture();
+
+        std::unique_ptr<GLTexture> m_cursorTexture;
+        bool m_cursorTextureDirty = false;
+        bool m_isMouseHidden = false;
+
+        std::unique_ptr<GLTexture> m_backgroundTexture;
+        std::unique_ptr<GLTexture> m_xorLookupTexture;
+        QSize m_backgroundTextureSize;
+
+        QRect m_lastCursorRect;
+    };
 
 } // namespace KWin
