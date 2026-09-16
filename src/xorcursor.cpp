@@ -47,14 +47,20 @@ void main()
     encoded.rgb *= encoded.a;
     encoded = encodingToNits(encoded, gamma22_EOTF, 0.0, destinationReferenceLuminance);
 
-    vec4 normal = nitsToDestinationEncoding(scene);
     vec4 inverted = nitsToDestinationEncoding(encoded);
 
     // The cursor image is uploaded in Qt's top-left-origin convention, while
     // KWin's GLTexture render path flips Y for OpenGL. Sample the cursor mask
     // with the inverse Y so the mask lines up with the rendered cursor.
     float mask = texture(cursorSampler, vec2(texcoord0.x, 1.0 - texcoord0.y)).a;
-    fragColor = mix(normal, inverted, mask);
+
+    // The effect renders the inverted cursor rectangle over the already-painted
+    // screen. Do not output the unmodified scene outside the cursor: doing so
+    // causes the entire offscreen rectangle to be blended back over the screen
+    // and can expose a rectangular border due to tiny differences between the
+    // offscreen and onscreen render paths. KWin uses premultiplied-alpha blending,
+    // so output only the inverted colour multiplied by the cursor alpha.
+    fragColor = vec4(inverted.rgb * mask, inverted.a * mask);
 }
 )SHADER";
 
