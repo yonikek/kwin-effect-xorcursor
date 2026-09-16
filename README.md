@@ -1,29 +1,19 @@
-# KWin XOR cursor refactor
+# KWin XOR cursor color-managed inversion refactor
 
-This is a proposed refactor for `yonikek/kwin-effect-xorcursor` on the
-`repaint-optimisation` branch.
+This is the corrected version for KWin 6.7.5.
 
-## What changes
+## Changes
 
-- Removes `GL_COLOR_LOGIC_OP` / `glLogicOp(GL_XOR)` from the cursor paint path.
-- Keeps the existing repaint optimization (old cursor rect + new cursor rect).
-- Paints the affected cursor region once, snapshots that region into a small
-  reusable framebuffer texture, and applies a shader pass over the snapshot.
-- Uses KWin's color-management helpers and the same gamma-2.2 inversion math
-  used by the built-in accessibility `InvertEffect`.
-- Uses the cursor alpha as the inversion mask, preserving antialiased cursor
-  edges instead of relying on integer framebuffer XOR.
+- Removes `GL_COLOR_LOGIC_OP` / `glLogicOp(GL_XOR)`.
+- Keeps the branch's repaint optimization (old cursor rect + new cursor rect).
+- Uses a small reusable `GLFramebuffer`/`GLTexture` snapshot for the cursor area.
+- Applies a shader pass using KWin's color-management helpers.
+- The inversion transform now matches KWin 6.7.5's built-in `InvertEffect` shader, including the `saturation.glsl` path with saturation set to 1.0.
+- Uses cursor alpha as a per-pixel inversion mask.
+- Fixes KWin 6.7.5's `EffectsHandler::paintScreen()` being `void` and the C++ vexing-parse issue around `Region`.
 
-## Files
+## Applying
 
-- `xorcursor.cpp` — proposed implementation
-- `xorcursor.h` — matching declarations
-- `0001-use-color-managed-inversion-instead-of-gl-logic-op.patch` — unified diff
+If you already applied the first patch, apply `0002-fix-kwin-6.7.5-build-errors.patch` on top of it.
 
-## Notes
-
-The patch has not been compiled in this environment because the KWin/Qt/KF6
-build dependencies are not installed here. The most important integration point
-to verify in a real KWin development environment is the custom shader's
-`colormanagement.glsl` include, since that is resolved by KWin's shader
-preprocessor.
+Alternatively replace your `src/xorcursor.cpp` with the supplied corrected file.

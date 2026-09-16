@@ -23,6 +23,7 @@ namespace
 constexpr auto s_invertCursorFragmentShader = R"SHADER(
 #version 140
 #include "colormanagement.glsl"
+#include "saturation.glsl"
 
 uniform sampler2D sampler;
 uniform sampler2D cursorSampler;
@@ -33,19 +34,20 @@ out vec4 fragColor;
 void main()
 {
     vec4 scene = texture(sampler, texcoord0);
-    vec4 nits = sourceEncodingToNitsInDestinationColorspace(scene);
+    scene = sourceEncodingToNitsInDestinationColorspace(scene);
+    scene = adjustSaturation(scene);
 
-    // Accessibility's invert effect performs the inversion in gamma 2.2 space
-    // to preserve perceptual contrast.
-    vec4 encoded = nitsToEncoding(nits, gamma22_EOTF, 0.0, destinationReferenceLuminance);
+    // This is the same inversion transform used by KWin's accessibility
+    // InvertEffect: do the inversion in gamma 2.2 space and convert back to
+    // the destination colorspace afterwards.
+    vec4 encoded = nitsToEncoding(scene, gamma22_EOTF, 0.0, destinationReferenceLuminance);
     encoded.rgb /= max(0.001, encoded.a);
     encoded.rgb = vec3(1.0) - encoded.rgb;
     encoded.rgb *= encoded.a;
+    encoded = encodingToNits(encoded, gamma22_EOTF, 0.0, destinationReferenceLuminance);
 
-    vec4 inverted = nitsToDestinationEncoding(
-        encodingToNits(encoded, gamma22_EOTF, 0.0, destinationReferenceLuminance));
-    vec4 normal = nitsToDestinationEncoding(nits);
-
+    vec4 normal = nitsToDestinationEncoding(scene);
+    vec4 inverted = nitsToDestinationEncoding(encoded);
     float mask = texture(cursorSampler, texcoord0).a;
     fragColor = mix(normal, inverted, mask);
 }
@@ -149,9 +151,7 @@ GLShader *XorCursorEffect::ensureInvertShader()
 
 void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
-    if (!effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen)) {
-        return;
-    }
+    effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
     if (!m_isMouseHidden) {
         return;
     }
@@ -167,19 +167,18 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     m_lastCursorRect = QRectF(p, cursorSize).toAlignedRect();
 
     const qreal scale = viewport.scale();
+    const QRect cursorLogicalRect = QRectF(p, cursorSize).toAlignedRect();
     const QRect cursorRect = QRectF(p.x() * scale,
                                     p.y() * scale,
                                     cursorSize.width() * scale,
                                     cursorSize.height() * scale)
                                 .toAlignedRect();
-    const Region cursorRegion(Rect(cursorRect));
+    const Region cursorRegion{Rect(cursorRect)};
 
     // Paint the cursor's underlying region first, then replace it with the
     // color-managed inverted version. This keeps the repaint optimization
     // while avoiding GL_COLOR_LOGIC_OP / bitwise framebuffer XOR.
-    if (!effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen)) {
-        return;
-    }
+    effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
     if (!ensureBackgroundBuffer(cursorRect.size())) {
         return;
     }
@@ -187,7 +186,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     // Snapshot the already-composited cursor rectangle before sampling it in
     // the inversion shader. Sampling the current framebuffer directly would
     // create a read/write feedback loop.
-    if (!m_backgroundFramebuffer->blitFromRenderTarget(renderTarget, viewport, cursorRect, Rect(QPoint(), cursorRect.size()))) {
+    if (!m_backgroundFramebuffer->blitFromRenderTarget(renderTarget, viewport, Rect(cursorLogicalRect), Rect(QPoint(), cursorRect.size()))) {
         return;
     }
 
@@ -199,6 +198,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     ShaderBinder binder(shader);
     shader->setUniform(GLShader::IntUniform::Sampler, 0);
     shader->setUniform("cursorSampler", 1);
+    shader->setUniform("saturation", 1.0f);
     shader->setColorspaceUniforms(renderTarget.colorDescription(), renderTarget.colorDescription(), RenderingIntent::Perceptual);
 
     QMatrix4x4 mvp = viewport.projectionMatrix();
