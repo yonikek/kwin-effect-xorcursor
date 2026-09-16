@@ -5,17 +5,13 @@
 */
 
 #pragma once
-
-#include "core/colorspace.h"
 #include "effect/effect.h"
 
 namespace KWin
 {
 
-class GLFramebuffer;
-class GLTexture;
-class GLVertexBuffer;
 class GLShader;
+class GLTexture;
 
 class XorCursorEffect : public Effect
 {
@@ -38,9 +34,9 @@ private:
     void markCursorTextureDirty();
 
     std::unique_ptr<GLTexture> m_cursorTexture;
+    std::unique_ptr<GLShader> m_subtractiveShader;
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
-    // Tracks the exact logical bounding box of the cursor from the previous frame
     QRect m_lastCursorRect;
 };
 
