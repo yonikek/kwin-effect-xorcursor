@@ -11,10 +11,7 @@
 
 namespace KWin {
 
-    class GLFramebuffer;
     class GLTexture;
-    class GLVertexBuffer;
-    class GLShader;
 
     class XorCursorEffect : public Effect
     {
