@@ -1,133 +1,169 @@
-/*
-    SPDX-FileCopyrightText: 2025 Jin Liu <m.liu.jin@gmail.com>
-
-    SPDX-License-Identifier: GPL-2.0-or-later
-*/
-
 #include "xorcursor.h"
-#include "core/rendertarget.h"
-#include "core/renderviewport.h"
-#include "effect/effecthandler.h"
-#include "opengl/glutils.h"
 
-namespace KWin
-{
+#include <QPainter>
+#include <QMatrix4x4>
+#include <epoxy/gl.h>
+
+using namespace KWin;
 
 XorCursorEffect::XorCursorEffect()
+: m_textureDirty(true)
 {
-    hideCursor();
+    // Reload texture when the cursor shape changes
+    connect(effects, &EffectsHandler::cursorShapeChanged, this, &XorCursorEffect::slotCursorShapeChanged);
+
+    // Repaint optimization: only trigger repaints when the cursor actually moves
+    connect(effects, &EffectsHandler::mouseChanged, this, [this](const QPoint &pos, const QPoint &oldpos, Qt::MouseButtons, Qt::KeyboardModifiers, Qt::KeyboardModifiers) {
+        if (pos != oldpos) {
+            slotCursorPosChanged();
+        }
+    });
+
+    initShader();
 }
 
 XorCursorEffect::~XorCursorEffect()
 {
-    showCursor();
 }
 
-GLTexture *XorCursorEffect::ensureCursorTexture()
+void XorCursorEffect::initShader()
 {
-    if (!m_cursorTexture || m_cursorTextureDirty) {
-        m_cursorTexture.reset();
-        m_cursorTextureDirty = false;
-        const auto cursor = effects->cursorImage();
-        if (!cursor.image().isNull()) {
-            m_cursorTexture = GLTexture::upload(cursor.image());
-            if (!m_cursorTexture) {
-                return nullptr;
-            }
-            m_cursorTexture->setWrapMode(GL_CLAMP_TO_EDGE);
-        }
-    }
-    return m_cursorTexture.get();
+    // Custom fragment shader that forces the cursor to act as a pure white mask
+    // based on its alpha channel, completely ignoring its original RGB colors.
+    // This solves the "effect requires a white cursor" limitation.
+    const QByteArray fragmentShader = QByteArrayLiteral(
+        "uniform sampler2D sampler;\n"
+        "varying vec2 texcoord0;\n"
+        "void main() {\n"
+        "    vec4 tex = texture2D(sampler, texcoord0);\n"
+        "    // Output white color multiplied by the original alpha\n"
+        "    // Opaque parts become (1,1,1,1), transparent parts become (0,0,0,0)\n"
+        "    gl_FragColor = vec4(tex.a, tex.a, tex.a, tex.a);\n"
+        "}\n"
+    );
+
+    m_shader.reset(ShaderManager::instance()->generateShaderFromCode(QByteArray(), fragmentShader));
 }
 
-void XorCursorEffect::markCursorTextureDirty()
+void XorCursorEffect::slotCursorShapeChanged()
 {
-    m_cursorTextureDirty = true;
+    m_textureDirty = true;
+    effects->addRepaint(m_lastCursorRect);
 }
 
-void XorCursorEffect::showCursor()
+void XorCursorEffect::slotCursorPosChanged()
 {
-    if (m_isMouseHidden) {
-        disconnect(effects, &EffectsHandler::cursorShapeChanged, this, &XorCursorEffect::markCursorTextureDirty);
-        // show the previously hidden mouse-pointer again and free the loaded texture/picture.
-        effects->showCursor();
-        m_cursorTexture.reset();
-        m_isMouseHidden = false;
-    }
-}
+    // Repaint optimization: request repaint for the old cursor position
+    // and the new cursor position, rather than the whole screen.
+    effects->addRepaint(m_lastCursorRect);
 
-void XorCursorEffect::hideCursor()
-{
-    if (!m_isMouseHidden) {
-        // try to load the cursor-theme into a OpenGL texture and if successful then hide the mouse-pointer
-        GLTexture *texture = nullptr;
-        if (effects->isOpenGLCompositing()) {
-            texture = ensureCursorTexture();
-        }
-        if (texture) {
-            effects->hideCursor();
-            connect(effects, &EffectsHandler::cursorShapeChanged, this, &XorCursorEffect::markCursorTextureDirty);
-            connect(effects, &EffectsHandler::mouseChanged, this, &XorCursorEffect::slotMouseChanged);
-            m_isMouseHidden = true;
-        }
-    }
-}
+    QPoint hotspot = effects->cursorHotSpot();
+    QPoint pos = effects->cursorPos();
+    QSize size = effects->cursorImage().size();
 
-void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
-{
-    effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
-    if (!m_isMouseHidden) {
-        return;
-    }
-    GLTexture *cursorTexture = ensureCursorTexture();
-    if (!cursorTexture) {
-        return;
-    }
+    QRect newRect(pos - hotspot, size);
+    effects->addRepaint(newRect);
 
-    const auto cursor = effects->cursorImage();
-	QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-	const QPointF p = effects->cursorPos() - cursor.hotSpot();
-    // Store the exact logical bounding box for the next frame's cleanup
-    m_lastCursorRect = QRectF(p, cursorSize).toAlignedRect();
-	const auto scale = viewport.scale();
-
-	// FIX: Scale logical coordinates to device coordinates for the deviceRegion
-	QRectF cursorDeviceRect(p.x() * scale, p.y() * scale, cursorSize.width() * scale, cursorSize.height() * scale);
-	Region cursorRegion = Region(Rect(cursorDeviceRect.toAlignedRect()));
-    effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
-	glEnable(GL_COLOR_LOGIC_OP);
-    glLogicOp(GL_XOR);
-    auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture | ShaderTrait::TransformColorspace);
-    s->setColorspaceUniforms(ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
-    QMatrix4x4 mvp = viewport.projectionMatrix();
-    mvp.translate(p.x() * scale, p.y() * scale);
-    s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
-    cursorTexture->render(cursorSize * scale);
-    ShaderManager::instance()->popShader();
-	glDisable(GL_COLOR_LOGIC_OP);
+    m_lastCursorRect = newRect;
 }
 
 bool XorCursorEffect::isActive() const
 {
-    return m_isMouseHidden;
+    return effects->isOpenGLCompositing();
 }
 
-void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
+void XorCursorEffect::updateTexture()
 {
-    if (pos != old) {
-        const auto cursor = effects->cursorImage();
-        QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-
-        // Calculate the exact bounding box of the NEW cursor
-        QRect newRect = QRectF(pos - cursor.hotSpot(), cursorSize).toAlignedRect();
-
-        // Repaint the exact area of the PREVIOUS cursor (handles shape changes perfectly)
-        // and the exact area of the NEW cursor.
-        effects->addRepaint(KWin::Rect(m_lastCursorRect));
-        effects->addRepaint(KWin::Rect(newRect));
+    if (!m_textureDirty) {
+        return;
     }
+
+    QImage cursorImage = effects->cursorImage();
+    if (cursorImage.isNull()) {
+        m_cursorTexture.reset();
+        m_textureDirty = false;
+        return;
+    }
+
+    m_cursorTexture.reset(new GLTexture(cursorImage));
+    m_textureDirty = false;
 }
 
-} // namespace KWin
+void XorCursorEffect::prePaintScreen(ScreenPrePaintData &data, int time)
+{
+    // Add the current cursor rect to the paint region to ensure it repaints cleanly
+    data.paint |= m_lastCursorRect;
+    effects->prePaintScreen(data, time);
+}
 
-#include "moc_xorcursor.cpp"
+void XorCursorEffect::paintScreen(int mask, const QRegion &region, ScreenPaintData &data)
+{
+    // 1. Paint the rest of the screen first
+    effects->paintScreen(mask, region, data);
+
+    // 2. Overlay our shader-driven XOR cursor
+    updateTexture();
+    if (!m_cursorTexture || !m_shader) {
+        return;
+    }
+
+    QPoint hotspot = effects->cursorHotSpot();
+    QPoint pos = effects->cursorPos();
+    QRect rect(pos - hotspot, m_cursorTexture->size());
+
+    // Optimization: only render if the cursor is within the damaged region
+    if (!region.intersects(rect)) {
+        return;
+    }
+
+    // Save current blend state to avoid core-profile GL errors (no glPushAttrib)
+    GLboolean blendEnabled;
+    glGetBooleanv(GL_BLEND, &blendEnabled);
+    GLint blendSrc, blendDst;
+    glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrc);
+    glGetIntegerv(GL_BLEND_DST_RGB, &blendDst);
+
+    // Modern "XOR" equivalent using the Difference Blend Mode.
+    // Because our shader forces Src to pure white based on alpha, this mathematically
+    // forces Output = 1 - Dst, which is a perfect color inversion.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_COLOR);
+
+    // Bind Shader & Projection Matrix
+    ShaderBinder binder(m_shader.data());
+    m_shader->setUniform(GLShader::ModelViewProjectionMatrix, data.projectionMatrix());
+
+    m_cursorTexture->bind();
+
+    // Standard KWin Quad drawing using VBOs
+    GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
+    vbo->reset();
+    vbo->setUseColor(false);
+    vbo->bindArrays();
+
+    const float verts[] = {
+        (float)rect.x(), (float)rect.y(),
+        (float)rect.x() + rect.width(), (float)rect.y(),
+        (float)rect.x(), (float)rect.y() + rect.height(),
+        (float)rect.x() + rect.width(), (float)rect.y() + rect.height()
+    };
+
+    const float texcoords[] = {
+        0.0f, 0.0f,
+        1.0f, 0.0f,
+        0.0f, 1.0f,
+        1.0f, 1.0f
+    };
+
+    vbo->setData(4, 2, verts, texcoords);
+    vbo->draw(GL_TRIANGLE_STRIP, 0, 4);
+
+    vbo->unbindArrays();
+    m_cursorTexture->unbind();
+
+    // Restore old blend state
+    if (!blendEnabled) {
+        glDisable(GL_BLEND);
+    }
+    glBlendFunc(blendSrc, blendDst);
+}

@@ -1,47 +1,38 @@
-/*
-    SPDX-FileCopyrightText: 2025 Jin Liu <m.liu.jin@gmail.com>
+#ifndef XORCURSOR_H
+#define XORCURSOR_H
 
-    SPDX-License-Identifier: GPL-2.0-or-later
-*/
+#include <kwineffects.h>
+#include <QScopedPointer>
+#include <QRect>
 
-#pragma once
+namespace KWin {
+    class GLTexture;
+    class GLShader;
+}
 
-#include "core/colorspace.h"
-#include "effect/effect.h"
-
-namespace KWin
-{
-
-class GLFramebuffer;
-class GLTexture;
-class GLVertexBuffer;
-class GLShader;
-
-class XorCursorEffect : public Effect
+class XorCursorEffect : public KWin::Effect
 {
     Q_OBJECT
-
 public:
     XorCursorEffect();
     ~XorCursorEffect() override;
 
-    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen) override;
+    void prePaintScreen(KWin::ScreenPrePaintData &data, int time) override;
+    void paintScreen(int mask, const QRegion &region, KWin::ScreenPaintData &data) override;
     bool isActive() const override;
 
 private Q_SLOTS:
-    void slotMouseChanged(const QPointF &pos, const QPointF &old);
+    void slotCursorShapeChanged();
+    void slotCursorPosChanged();
 
 private:
-    void showCursor();
-    void hideCursor();
-    GLTexture *ensureCursorTexture();
-    void markCursorTextureDirty();
+    void updateTexture();
+    void initShader();
 
-    std::unique_ptr<GLTexture> m_cursorTexture;
-    bool m_cursorTextureDirty = false;
-    bool m_isMouseHidden = false;
-    // Tracks the exact logical bounding box of the cursor from the previous frame
+    QScopedPointer<KWin::GLTexture> m_cursorTexture;
+    QScopedPointer<KWin::GLShader> m_shader;
+    bool m_textureDirty;
     QRect m_lastCursorRect;
 };
 
-} // namespace KWin
+#endif // XORCURSOR_H
