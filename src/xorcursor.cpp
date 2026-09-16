@@ -31,8 +31,6 @@ namespace KWin {
             reinterpret_cast<const char *>(versionString),
                                                        qstrlen(reinterpret_cast<const char *>(versionString)));
 
-        // The string can look like "1.40", "4.60 NVIDIA", "3.00 ES",
-        // "OpenGL ES GLSL ES 3.00", etc. Find the first x.y pattern.
         const QRegularExpression re(QStringLiteral(R"((\d+)\.(\d+))"));
     const auto match = re.match(QString::fromLatin1(str));
     if (!match.hasMatch()) {
@@ -58,7 +56,16 @@ static bool useModernGlsl()
 }
 
 // ---------------------------------------------------------------------------
-// XOR fragment shaders.
+// XOR cursor fragment shaders.
+//
+// The classic X11 "XorCursor" behaviour is: the cursor's bitmap acts as a
+// 1-bit mask; where the mask is 1, the screen is XORed with 0xFF (i.e.
+// bitwise NOT / inversion); where the mask is 0, the screen is untouched.
+//
+// This is what the effect should do, and it works with ANY cursor theme
+// because we use the cursor's alpha channel as the mask rather than its RGB
+// values. For normalized 8-bit colour components, "1.0 - x" is exactly
+// "x XOR 0xFF", so we get a genuine bitwise XOR with all-ones.
 //
 // `generateCustomShader` replaces the generated fragment shader entirely, so
 // these sources must be self-contained. The generated vertex shader for
@@ -69,37 +76,39 @@ static bool useModernGlsl()
 //     varying/out   vec2 texcoord0;
 //
 // and writes `texcoord0 = texcoord.st;`. It does NOT use gl_TexCoord, so we
-// must sample with `texcoord0`.
+// must sample with `texcoord0`. The fragment shader must declare
+// `uniform sampler2D sampler;` and the `texcoord0` varying itself.
 //
-// The fragment shader must declare `uniform sampler2D sampler;` and the
-// `texcoord0` varying itself, because the generated fragment header is not
-// included when a custom fragment source is supplied.
+// KWin's GLTexture::upload does not flip the image, and GLTexture::render
+// uses (0, 0) as the texcoord for the top-left of the quad. We follow that
+// convention here for the cursor texture. The background texture, however,
+// is filled by glCopyTexSubImage2D, which writes into GL's bottom-up
+// orientation, so we flip its V coordinate in the shader.
 // ---------------------------------------------------------------------------
 
 // GLSL 1.10 / ES 1.00 variant (used when the context GLSL version < 1.40)
-static const char kXorShaderSourceLegacy[] = R"(
+static const char kInvertShaderSourceLegacy[] = R"(
 uniform sampler2D sampler;
 uniform sampler2D backgroundTexture;
-uniform sampler2D xorLookup;
 varying vec2 texcoord0;
 
 void main()
 {
-    vec4 cursor     = texture2D(sampler,           texcoord0);
-    vec4 background = texture2D(backgroundTexture, texcoord0);
+    vec4 cursor = texture2D(sampler, texcoord0);
 
-    float cr = floor(cursor.r     * 255.0 + 0.5);
-    float cg = floor(cursor.g     * 255.0 + 0.5);
-    float cb = floor(cursor.b     * 255.0 + 0.5);
-    float br = floor(background.r * 255.0 + 0.5);
-    float bg = floor(background.g * 255.0 + 0.5);
-    float bb = floor(background.b * 255.0 + 0.5);
+    // The background texture is stored bottom-up (glCopyTexSubImage2D);
+    // flip its V coordinate so it lines up with the top-down cursor.
+    vec4 background = texture2D(backgroundTexture,
+                                vec2(texcoord0.x, 1.0 - texcoord0.y));
 
-    float xr = texture2D(xorLookup, vec2((cr + 0.5) / 256.0, (br + 0.5) / 256.0)).r;
-    float xg = texture2D(xorLookup, vec2((cg + 0.5) / 256.0, (bg + 0.5) / 256.0)).r;
-    float xb = texture2D(xorLookup, vec2((cb + 0.5) / 256.0, (bb + 0.5) / 256.0)).r;
+    // Invert the background: for normalized 8-bit values, 1.0 - x is
+    // exactly x XOR 0xFF, the classic bitwise XOR cursor operation.
+    vec3 inverted = vec3(1.0) - background.rgb;
 
-    gl_FragColor = vec4(xr, xg, xb, cursor.a);
+    // Use the cursor's alpha channel as the mask. Opaque pixels show the
+    // inverted background; transparent pixels leave it untouched. This is
+    // the proper bitwise XOR cursor semantics and works with any theme.
+    gl_FragColor = vec4(inverted, cursor.a);
 }
 )";
 
@@ -107,38 +116,28 @@ void main()
 // KWin's GLShader::prepareSource rewrites "#version 140" to
 // "#version 300 es\n\nprecision highp float;\n" for ES 3.00 contexts, so this
 // single source works for both desktop GLSL 1.40+ and GLSL ES 3.00.
-static const char kXorShaderSourceModern[] = R"(
+static const char kInvertShaderSourceModern[] = R"(
 #version 140
 uniform sampler2D sampler;
 uniform sampler2D backgroundTexture;
-uniform sampler2D xorLookup;
 in vec2 texcoord0;
 out vec4 fragColor;
 
 void main()
 {
-    vec4 cursor     = texture(sampler,           texcoord0);
-    vec4 background = texture(backgroundTexture, texcoord0);
+    vec4 cursor = texture(sampler, texcoord0);
+    vec4 background = texture(backgroundTexture,
+                              vec2(texcoord0.x, 1.0 - texcoord0.y));
 
-    float cr = floor(cursor.r     * 255.0 + 0.5);
-    float cg = floor(cursor.g     * 255.0 + 0.5);
-    float cb = floor(cursor.b     * 255.0 + 0.5);
-    float br = floor(background.r * 255.0 + 0.5);
-    float bg = floor(background.g * 255.0 + 0.5);
-    float bb = floor(background.b * 255.0 + 0.5);
+    vec3 inverted = vec3(1.0) - background.rgb;
 
-    float xr = texture(xorLookup, vec2((cr + 0.5) / 256.0, (br + 0.5) / 256.0)).r;
-    float xg = texture(xorLookup, vec2((cg + 0.5) / 256.0, (bg + 0.5) / 256.0)).r;
-    float xb = texture(xorLookup, vec2((cb + 0.5) / 256.0, (bb + 0.5) / 256.0)).r;
-
-    fragColor = vec4(xr, xg, xb, cursor.a);
+    fragColor = vec4(inverted, cursor.a);
 }
 )";
 
 XorCursorEffect::XorCursorEffect()
 {
     hideCursor();
-    createXorLookupTexture();
 }
 
 XorCursorEffect::~XorCursorEffect()
@@ -197,26 +196,6 @@ void XorCursorEffect::hideCursor()
     }
 }
 
-void XorCursorEffect::createXorLookupTexture()
-{
-    // 256x256 RGBA texture: texel (x, y) = x ^ y in the red channel.
-    QImage lookup(256, 256, QImage::Format_RGBA8888);
-    for (int a = 0; a < 256; ++a) {
-        for (int b = 0; b < 256; ++b) {
-            const uchar x = static_cast<uchar>(a ^ b);
-            lookup.setPixelColor(a, b, QColor(x, x, x, 255));
-        }
-    }
-
-    m_xorLookupTexture = GLTexture::upload(lookup);
-    if (m_xorLookupTexture) {
-        m_xorLookupTexture->setWrapMode(GL_CLAMP_TO_EDGE);
-        m_xorLookupTexture->setFilter(GL_NEAREST);
-    } else {
-        qWarning() << "XorCursorEffect: failed to create XOR lookup texture";
-    }
-}
-
 void XorCursorEffect::ensureBackgroundTexture(const QSize &deviceSize)
 {
     if (m_backgroundTexture && m_backgroundTextureSize == deviceSize) {
@@ -261,24 +240,36 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     const QRectF cursorDeviceRect(p.x() * scale, p.y() * scale,
                                   cursorSize.width() * scale,
                                   cursorSize.height() * scale);
-    const QSize deviceSize = cursorDeviceRect.toAlignedRect().size();
-    const Region cursorRegion(Rect(cursorDeviceRect.toAlignedRect()));
+
+    const QRect deviceRect = cursorDeviceRect.toAlignedRect();
+    const QSize deviceSize = deviceRect.size();
+    const Region cursorRegion(Rect(deviceRect));
 
     effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 
+    // -----------------------------------------------------------------------
+    // Capture the background behind the cursor.
+    //
+    // OpenGL's framebuffer origin is bottom-left, but KWin's logical
+    // coordinates are top-left, so we must convert the Y coordinate. The
+    // bottom of the cursor region in KWin coordinates is `y + height`, which
+    // corresponds to framebuffer Y = screenHeight - (y + height).
+    // -----------------------------------------------------------------------
     ensureBackgroundTexture(deviceSize);
     if (m_backgroundTexture) {
+        const int captureY = renderTarget.size().height() - (deviceRect.y() + deviceRect.height());
+
         glActiveTexture(GL_TEXTURE1);
         m_backgroundTexture->bind();
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                            cursorDeviceRect.x(), cursorDeviceRect.y(),
+                            deviceRect.x(), captureY,
                             deviceSize.width(), deviceSize.height());
         glActiveTexture(GL_TEXTURE0);
     }
 
     const QByteArray fragmentSource = useModernGlsl()
-    ? QByteArray(kXorShaderSourceModern)
-    : QByteArray(kXorShaderSourceLegacy);
+    ? QByteArray(kInvertShaderSourceModern)
+    : QByteArray(kInvertShaderSourceLegacy);
 
     auto shader = ShaderManager::instance()->generateCustomShader(
         ShaderTrait::MapTexture,
@@ -301,17 +292,12 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     ShaderManager::instance()->pushShader(shader.get());
     shader->setUniform("sampler", 0);
     shader->setUniform("backgroundTexture", 1);
-    shader->setUniform("xorLookup", 2);
 
     glActiveTexture(GL_TEXTURE0);
     cursorTexture->bind();
     glActiveTexture(GL_TEXTURE1);
     if (m_backgroundTexture) {
         m_backgroundTexture->bind();
-    }
-    glActiveTexture(GL_TEXTURE2);
-    if (m_xorLookupTexture) {
-        m_xorLookupTexture->bind();
     }
     glActiveTexture(GL_TEXTURE0);
 
@@ -320,6 +306,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
 
     // Draw a textured quad using KWin's modern GLVertexBuffer API.
+    // KWin's convention: texcoord (0, 0) is the top-left of the source image.
     const QSizeF size = cursorSize * scale;
     const QRectF rect(0.0, 0.0, size.width(), size.height());
 
@@ -327,10 +314,10 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     vbo->reset();
 
     const std::array<GLVertex2D, 4> vertices = {{
-        {QVector2D(rect.left(),  rect.top()),    QVector2D(0.0f, 1.0f)},
-        {QVector2D(rect.right(), rect.top()),    QVector2D(1.0f, 1.0f)},
-        {QVector2D(rect.left(),  rect.bottom()), QVector2D(0.0f, 0.0f)},
-        {QVector2D(rect.right(), rect.bottom()), QVector2D(1.0f, 0.0f)},
+        {QVector2D(rect.left(),  rect.top()),    QVector2D(0.0f, 0.0f)},
+        {QVector2D(rect.right(), rect.top()),    QVector2D(1.0f, 0.0f)},
+        {QVector2D(rect.left(),  rect.bottom()), QVector2D(0.0f, 1.0f)},
+        {QVector2D(rect.right(), rect.bottom()), QVector2D(1.0f, 1.0f)},
     }};
 
     vbo->setVertices(vertices);

@@ -37,14 +37,12 @@ namespace KWin {
         void markCursorTextureDirty();
 
         void ensureBackgroundTexture(const QSize &deviceSize);
-        void createXorLookupTexture();
 
         std::unique_ptr<GLTexture> m_cursorTexture;
         bool m_cursorTextureDirty = false;
         bool m_isMouseHidden = false;
 
         std::unique_ptr<GLTexture> m_backgroundTexture;
-        std::unique_ptr<GLTexture> m_xorLookupTexture;
         QSize m_backgroundTextureSize;
 
         QRect m_lastCursorRect;
