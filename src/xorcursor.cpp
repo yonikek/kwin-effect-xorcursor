@@ -62,10 +62,10 @@ static bool useModernGlsl()
 // 1-bit mask; where the mask is 1, the screen is XORed with 0xFF (i.e.
 // bitwise NOT / inversion); where the mask is 0, the screen is untouched.
 //
-// This is what the effect should do, and it works with ANY cursor theme
-// because we use the cursor's alpha channel as the mask rather than its RGB
-// values. For normalized 8-bit colour components, "1.0 - x" is exactly
-// "x XOR 0xFF", so we get a genuine bitwise XOR with all-ones.
+// For normalized 8-bit colour components, "1.0 - x" is exactly
+// "x XOR 0xFF", so we get a genuine bitwise XOR with all-ones. This works
+// with ANY cursor theme because the cursor's alpha channel is used as the
+// mask, not its RGB values.
 //
 // `generateCustomShader` replaces the generated fragment shader entirely, so
 // these sources must be self-contained. The generated vertex shader for
@@ -79,11 +79,10 @@ static bool useModernGlsl()
 // must sample with `texcoord0`. The fragment shader must declare
 // `uniform sampler2D sampler;` and the `texcoord0` varying itself.
 //
-// KWin's GLTexture::upload does not flip the image, and GLTexture::render
-// uses (0, 0) as the texcoord for the top-left of the quad. We follow that
-// convention here for the cursor texture. The background texture, however,
-// is filled by glCopyTexSubImage2D, which writes into GL's bottom-up
-// orientation, so we flip its V coordinate in the shader.
+// KWin's GLTexture::upload keeps the top row of the image at texture row 0,
+// and KWin's RenderTarget framebuffer is likewise addressed top-down when
+// glCopyTexSubImage2D reads it, so both the cursor and the background
+// textures are sampled with the same texcoord0 and line up naturally.
 // ---------------------------------------------------------------------------
 
 // GLSL 1.10 / ES 1.00 variant (used when the context GLSL version < 1.40)
@@ -94,20 +93,15 @@ varying vec2 texcoord0;
 
 void main()
 {
-    vec4 cursor = texture2D(sampler, texcoord0);
-
-    // The background texture is stored bottom-up (glCopyTexSubImage2D);
-    // flip its V coordinate so it lines up with the top-down cursor.
-    vec4 background = texture2D(backgroundTexture,
-                                vec2(texcoord0.x, 1.0 - texcoord0.y));
+    vec4 cursor     = texture2D(sampler,           texcoord0);
+    vec4 background = texture2D(backgroundTexture, texcoord0);
 
     // Invert the background: for normalized 8-bit values, 1.0 - x is
     // exactly x XOR 0xFF, the classic bitwise XOR cursor operation.
     vec3 inverted = vec3(1.0) - background.rgb;
 
     // Use the cursor's alpha channel as the mask. Opaque pixels show the
-    // inverted background; transparent pixels leave it untouched. This is
-    // the proper bitwise XOR cursor semantics and works with any theme.
+    // inverted background; transparent pixels leave it untouched.
     gl_FragColor = vec4(inverted, cursor.a);
 }
 )";
@@ -125,9 +119,8 @@ out vec4 fragColor;
 
 void main()
 {
-    vec4 cursor = texture(sampler, texcoord0);
-    vec4 background = texture(backgroundTexture,
-                              vec2(texcoord0.x, 1.0 - texcoord0.y));
+    vec4 cursor     = texture(sampler,           texcoord0);
+    vec4 background = texture(backgroundTexture, texcoord0);
 
     vec3 inverted = vec3(1.0) - background.rgb;
 
@@ -248,21 +241,17 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 
     // -----------------------------------------------------------------------
-    // Capture the background behind the cursor.
-    //
-    // OpenGL's framebuffer origin is bottom-left, but KWin's logical
-    // coordinates are top-left, so we must convert the Y coordinate. The
-    // bottom of the cursor region in KWin coordinates is `y + height`, which
-    // corresponds to framebuffer Y = screenHeight - (y + height).
+    // Capture the background behind the cursor. KWin's RenderTarget
+    // framebuffer is addressed top-down relative to the render viewport, so
+    // deviceRect.y() is the correct source Y for glCopyTexSubImage2D — no
+    // vertical conversion is needed.
     // -----------------------------------------------------------------------
     ensureBackgroundTexture(deviceSize);
     if (m_backgroundTexture) {
-        const int captureY = renderTarget.size().height() - (deviceRect.y() + deviceRect.height());
-
         glActiveTexture(GL_TEXTURE1);
         m_backgroundTexture->bind();
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
-                            deviceRect.x(), captureY,
+                            deviceRect.x(), deviceRect.y(),
                             deviceSize.width(), deviceSize.height());
         glActiveTexture(GL_TEXTURE0);
     }
