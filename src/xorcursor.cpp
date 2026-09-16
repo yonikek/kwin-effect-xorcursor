@@ -6,33 +6,45 @@
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
-#include "opengl/glutils.h"
+#include "opengl/glplatform.h"
 #include "opengl/gltexture.h"
+#include "opengl/glutils.h"
+#include "opengl/glvertexbuffer.h"
 
 #include <QImage>
 
 namespace KWin {
 
     // ---------------------------------------------------------------------------
-    // XOR fragment shader (GLSL 1.10, using KWin's MapTexture conventions).
+    // XOR fragment shaders.
     //
-    //   * `u_texture` and `varying vec2 texcoord` are provided automatically by
-    //     ShaderTrait::MapTexture, so we must NOT redeclare them.
-    //   * `backgroundTexture` holds a snapshot of the framebuffer region behind
-    //     the cursor, captured with glCopyTexSubImage2D right before drawing.
-    //   * `xorLookup` is a 256x256 RGBA texture where texel (x, y) stores
-    //     (x ^ y) in its red channel.  GLSL 1.10 has no bitwise operators, so
-    //     this lookup is the only portable way to perform exact bitwise XOR.
-    //   * The cursor's alpha channel is preserved so any cursor theme works.
+    // `generateCustomShader` replaces the generated fragment shader entirely, so
+    // these sources must be self‑contained.  The generated vertex shader for
+    // ShaderTrait::MapTexture declares:
+    //
+    //     attribute/in  vec4 position;
+    //     attribute/in  vec4 texcoord;
+    //     varying/out   vec2 texcoord0;
+    //
+    // and writes `texcoord0 = texcoord.st;`.  It does NOT use gl_TexCoord, so we
+    // must sample with `texcoord0`.
+    //
+    // The fragment shader itself must declare `uniform sampler2D sampler;` and
+    // `varying/in vec2 texcoord0;` because the generated header is not included
+    // when a custom fragment source is supplied.
+    //
+    // GLSL 1.10 / ES 1.00 variant (used when the context GLSL version < 1.40):
     // ---------------------------------------------------------------------------
-    static const char kXorShaderSource[] = R"(
+    static const char kXorShaderSourceLegacy[] = R"(
+uniform sampler2D sampler;
 uniform sampler2D backgroundTexture;
 uniform sampler2D xorLookup;
+varying vec2 texcoord0;
 
 void main()
 {
-    vec4 cursor     = texture2D(u_texture,         texcoord);
-    vec4 background = texture2D(backgroundTexture, texcoord);
+    vec4 cursor     = texture2D(sampler,         texcoord0);
+    vec4 background = texture2D(backgroundTexture, texcoord0);
 
     float cr = floor(cursor.r     * 255.0 + 0.5);
     float cg = floor(cursor.g     * 255.0 + 0.5);
@@ -46,6 +58,40 @@ void main()
     float xb = texture2D(xorLookup, vec2((cb + 0.5) / 256.0, (bb + 0.5) / 256.0)).r;
 
     gl_FragColor = vec4(xr, xg, xb, cursor.a);
+}
+)";
+
+// ---------------------------------------------------------------------------
+// GLSL 1.40+ / ES 3.00 variant.  KWin's GLShader::prepareSource rewrites
+// "#version 140" to "#version 300 es\n\nprecision highp float;\n" for ES 3.00
+// contexts, so this single source works for both desktop GLSL 1.40+ and
+// GLSL ES 3.00.
+// ---------------------------------------------------------------------------
+static const char kXorShaderSourceModern[] = R"(
+#version 140
+uniform sampler2D sampler;
+uniform sampler2D backgroundTexture;
+uniform sampler2D xorLookup;
+in vec2 texcoord0;
+out vec4 fragColor;
+
+void main()
+{
+    vec4 cursor     = texture(sampler,         texcoord0);
+    vec4 background = texture(backgroundTexture, texcoord0);
+
+    float cr = floor(cursor.r     * 255.0 + 0.5);
+    float cg = floor(cursor.g     * 255.0 + 0.5);
+    float cb = floor(cursor.b     * 255.0 + 0.5);
+    float br = floor(background.r * 255.0 + 0.5);
+    float bg = floor(background.g * 255.0 + 0.5);
+    float bb = floor(background.b * 255.0 + 0.5);
+
+    float xr = texture(xorLookup, vec2((cr + 0.5) / 256.0, (br + 0.5) / 256.0)).r;
+    float xg = texture(xorLookup, vec2((cg + 0.5) / 256.0, (bg + 0.5) / 256.0)).r;
+    float xb = texture(xorLookup, vec2((cb + 0.5) / 256.0, (bb + 0.5) / 256.0)).r;
+
+    fragColor = vec4(xr, xg, xb, cursor.a);
 }
 )";
 
@@ -113,7 +159,6 @@ void XorCursorEffect::hideCursor()
 
 void XorCursorEffect::createXorLookupTexture()
 {
-    // 256x256 RGBA texture: texel (x, y) = x ^ y in the red channel.
     QImage lookup(256, 256, QImage::Format_RGBA8888);
     for (int a = 0; a < 256; ++a) {
         for (int b = 0; b < 256; ++b) {
@@ -178,13 +223,8 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     const QSize deviceSize = cursorDeviceRect.toAlignedRect().size();
     const Region cursorRegion(Rect(cursorDeviceRect.toAlignedRect()));
 
-    // Re-paint just the cursor region so any effects that draw there are
-    // included in the background we are about to XOR against.
     effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 
-    // -----------------------------------------------------------------------
-    // 1. Capture the background behind the cursor into m_backgroundTexture.
-    // -----------------------------------------------------------------------
     ensureBackgroundTexture(deviceSize);
     if (m_backgroundTexture) {
         glActiveTexture(GL_TEXTURE1);
@@ -195,22 +235,21 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
         glActiveTexture(GL_TEXTURE0);
     }
 
-    // -----------------------------------------------------------------------
-    // 2. Draw the cursor using our custom XOR shader.
-    // -----------------------------------------------------------------------
+    const bool useModernGLSL = GLPlatform::instance()->glslVersion() >= Version(1, 40);
+    const QByteArray fragmentSource = useModernGLSL
+    ? QByteArray(kXorShaderSourceModern)
+    : QByteArray(kXorShaderSourceLegacy);
+
     auto shader = ShaderManager::instance()->generateCustomShader(
         ShaderTrait::MapTexture,
         QByteArray(),
-                                                                  QByteArray(kXorShaderSource));
+                                                                  fragmentSource);
 
     if (!shader) {
-        qWarning(KWIN_EFFECT_LOG) << "XorCursorEffect: custom shader unavailable, "
-        "falling back to plain cursor rendering";
-        cursorTexture->render(cursorSize * scale);
+        qWarning(KWIN_EFFECT_LOG) << "XorCursorEffect: custom shader unavailable";
         return;
     }
 
-    // Save blend state so we don't leak it to the rest of the compositor.
     const GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
     GLint oldBlendSrc = 0, oldBlendDst = 0;
     glGetIntegerv(GL_BLEND_SRC_ALPHA, &oldBlendSrc);
@@ -220,7 +259,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     ShaderManager::instance()->pushShader(shader.get());
-    shader->setUniform("u_texture", 0);
+    shader->setUniform("sampler", 0);
     shader->setUniform("backgroundTexture", 1);
     shader->setUniform("xorLookup", 2);
 
@@ -240,31 +279,25 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     mvp.translate(p.x() * scale, p.y() * scale);
     shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
 
-    // Use the low-level textured-quad draw rather than GLTexture::render(),
-    // because the latter can push its own shader and shadow ours.
-    {
-        const QSizeF size = cursorSize * scale;
-        const QRectF rect(0.0, 0.0, size.width(), size.height());
-        GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
-        vbo->reset();
-        vbo->setUseColorSpace(false);
-        vbo->setAttribLayout(GLVertexBuffer::GLVertex2DLayout,
-                             sizeof(GLVertex2D), 4);
-        GLVertex2D *map = static_cast<GLVertex2D *>(vbo->map(sizeof(GLVertex2D) * 4));
-        const QRectF &r = rect;
-        map[0] = GLVertex2D{r.x(),         r.y(),         0.0f, 1.0f};
-        map[1] = GLVertex2D{r.right(),     r.y(),         1.0f, 1.0f};
-        map[2] = GLVertex2D{r.x(),         r.bottom(),    0.0f, 0.0f};
-        map[3] = GLVertex2D{r.right(),     r.bottom(),    1.0f, 0.0f};
-        vbo->unmap();
-        vbo->bindArrays();
-        vbo->draw(GL_TRIANGLE_STRIP, 0, 4);
-        vbo->unbindArrays();
-    }
+    // Draw a textured quad using KWin's modern GLVertexBuffer API.
+    const QSizeF size = cursorSize * scale;
+    const QRectF rect(0.0, 0.0, size.width(), size.height());
+
+    GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
+    vbo->reset();
+
+    const std::array<GLVertex2D, 4> vertices = {{
+        {QVector2D(rect.left(),  rect.top()),    QVector2D(0.0f, 1.0f)},
+        {QVector2D(rect.right(), rect.top()),    QVector2D(1.0f, 1.0f)},
+        {QVector2D(rect.left(),  rect.bottom()), QVector2D(0.0f, 0.0f)},
+        {QVector2D(rect.right(), rect.bottom()), QVector2D(1.0f, 0.0f)},
+    }};
+
+    vbo->setVertices(vertices);
+    vbo->render(GL_TRIANGLE_STRIP);
 
     ShaderManager::instance()->popShader();
 
-    // Restore blend state.
     glBlendFunc(oldBlendSrc, oldBlendDst);
     if (!blendWasEnabled) {
         glDisable(GL_BLEND);
