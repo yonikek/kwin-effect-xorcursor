@@ -54,16 +54,12 @@ void main()
     // with the inverse Y so the mask lines up with the rendered cursor.
     float mask = texture(cursorSampler, vec2(texcoord0.x, 1.0 - texcoord0.y)).a;
 
-    // The scratch target covers a rectangle, but only the cursor shape should
-    // affect the real render target. Discard the transparent part of the cursor
-    // so the scratch rectangle itself can never overwrite the screen. For the
-    // actual cursor pixels, preserve the rendered scene and interpolate toward
-    // the inverted version using the cursor alpha. This also avoids depending
-    // on the caller having a particular blend state.
-    if (mask <= 0.001) {
-        discard;
-    }
-    fragColor = mix(scene, inverted, mask);
+    // Output the inverted image with the cursor alpha as coverage. The draw
+    // below explicitly enables ordinary source-alpha blending, so transparent
+    // parts of the cursor leave the already-rendered screen untouched. This is
+    // cheaper than a per-fragment discard and avoids the bright edge artifacts
+    // caused by treating the cursor alpha as a hard cutout.
+    fragColor = vec4(inverted.rgb, mask);
 }
 )SHADER";
 
@@ -243,11 +239,19 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     glActiveTexture(GL_TEXTURE1);
     cursorTexture->bind();
 
+    // Composite only the cursor-covered pixels over the already rendered
+    // screen. This keeps the rectangular scratch target from leaking into the
+    // visible framebuffer, without using discard in the fragment shader.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
     glActiveTexture(GL_TEXTURE0);
     // When the persistent scratch texture is larger than the current cursor,
     // render only the portion containing this frame's copied background.
     const QRectF source(0, 0, cursorRect.width(), cursorRect.height());
     m_backgroundTexture->render(source, Region::infinite(), cursorRect.size());
+
+    glDisable(GL_BLEND);
 
     glActiveTexture(GL_TEXTURE1);
     cursorTexture->unbind();
