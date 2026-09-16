@@ -16,7 +16,8 @@
 namespace KWin {
 
     // ---------------------------------------------------------------------------
-    // Returns the major/minor GLSL version from the driver, e.g. "1.40" -> (1,40).
+    // Returns the GLSL version parsed from the driver's
+    // GL_SHADING_LANGUAGE_VERSION string, e.g. "1.40" -> (1, 40).
     // Falls back to (1, 10) if the string cannot be parsed.
     // ---------------------------------------------------------------------------
     static Version parseGlslVersion()
@@ -30,8 +31,8 @@ namespace KWin {
             reinterpret_cast<const char *>(versionString),
                                                        qstrlen(reinterpret_cast<const char *>(versionString)));
 
-        // The string can look like "1.40", "4.60 NVIDIA", "3.00 ES", "OpenGL ES GLSL ES 3.00", etc.
-        // Find the first x.y pattern.
+        // The string can look like "1.40", "4.60 NVIDIA", "3.00 ES",
+        // "OpenGL ES GLSL ES 3.00", etc. Find the first x.y pattern.
         const QRegularExpression re(QStringLiteral(R"((\d+)\.(\d+))"));
     const auto match = re.match(QString::fromLatin1(str));
     if (!match.hasMatch()) {
@@ -84,7 +85,7 @@ varying vec2 texcoord0;
 
 void main()
 {
-    vec4 cursor     = texture2D(sampler,         texcoord0);
+    vec4 cursor     = texture2D(sampler,           texcoord0);
     vec4 background = texture2D(backgroundTexture, texcoord0);
 
     float cr = floor(cursor.r     * 255.0 + 0.5);
@@ -116,7 +117,7 @@ out vec4 fragColor;
 
 void main()
 {
-    vec4 cursor     = texture(sampler,         texcoord0);
+    vec4 cursor     = texture(sampler,           texcoord0);
     vec4 background = texture(backgroundTexture, texcoord0);
 
     float cr = floor(cursor.r     * 255.0 + 0.5);
@@ -212,7 +213,7 @@ void XorCursorEffect::createXorLookupTexture()
         m_xorLookupTexture->setWrapMode(GL_CLAMP_TO_EDGE);
         m_xorLookupTexture->setFilter(GL_NEAREST);
     } else {
-        qCWarning(KWINEFFECTS) << "XorCursorEffect: failed to create XOR lookup texture";
+        qWarning() << "XorCursorEffect: failed to create XOR lookup texture";
     }
 }
 
@@ -285,7 +286,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
                                                                   fragmentSource);
 
     if (!shader) {
-        qCWarning(KWINEFFECTS) << "XorCursorEffect: custom shader unavailable";
+        qWarning() << "XorCursorEffect: custom shader unavailable";
         return;
     }
 
