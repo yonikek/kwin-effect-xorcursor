@@ -243,7 +243,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
 
     const QRect deviceRect = cursorDeviceRect.toAlignedRect();
     const QSize deviceSize = deviceRect.size();
-    const Region cursorRegion = Region(deviceRect);
+    const Region cursorRegion = Region(Rect(deviceRect));
 
     effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 
