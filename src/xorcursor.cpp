@@ -208,7 +208,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     // GLFramebuffer::blitFromRenderTarget(). Fall back to KWin's blit helper
     // for transformed targets and non-FBO render targets.
     bool copied = false;
-    const Rect sourceRect = viewport.mapToRenderTarget(cursorLogicalRect);
+    const Rect sourceRect = viewport.mapToRenderTarget(Rect(cursorLogicalRect));
     GLFramebuffer *currentFramebuffer = GLFramebuffer::currentFramebuffer();
     if (renderTarget.framebuffer() == currentFramebuffer
         && viewport.transform() == OutputTransform::Normal
