@@ -19,9 +19,9 @@ stdenv.mkDerivation rec {
     wrapQtAppsHook
   ];
 
-  buildInputs = [
-    kwin
-    qttools
+  buildInputs = with pkgs.kdePackages; [
+    kwin            # <-- This provides kwineffects.h
+    qtbase
   ];
 
   meta = with lib; {
