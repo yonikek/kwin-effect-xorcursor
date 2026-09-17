@@ -11,20 +11,20 @@
       let
         pkgs = import nixpkgs {
           inherit system;
-          # Required if you depend on any unfree packages. Harmless otherwise.
-          config.allowUnfree = true;
         };
+
+        # Single derivation, shared between both package attrs. Building
+        # this once and aliasing avoids a duplicate build.
+        xorcursor = pkgs.callPackage ./package.nix { };
       in
       {
         packages = {
-          default = pkgs.callPackage ./package.nix { };
-          xorcursor = pkgs.callPackage ./package.nix { };
+          inherit xorcursor;
+          default = xorcursor;
         };
 
-        # `nix develop` shell for working on the effect locally. Mirrors the
-        # build inputs plus a few conveniences.
         devShells.default = pkgs.mkShell {
-          inputsFrom = [ self.packages.${system}.default ];
+          inputsFrom = [ xorcursor ];
           packages = with pkgs; [
             cmake
             ninja
