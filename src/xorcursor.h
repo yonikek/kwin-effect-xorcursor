@@ -3,19 +3,31 @@
  */
 #pragma once
 
-#include "core/colorspace.h"
 #include "effect/effect.h"
 
-#include <QImage>
+#include <QPointF>
+#include <QRect>
+#include <QSize>
+
 #include <memory>
 
 namespace KWin {
 
     class GLTexture;
 
+    /**
+     * Draws the cursor as an inverting (XOR with all-ones) mask over the
+     * composited scene, reproducing the classic X11 "XorCursor" behaviour.
+     *
+     * The cursor image itself contributes only its alpha channel: opaque pixels
+     * invert the background, transparent pixels leave it untouched. This works
+     * with any cursor theme, including dark outlines and multi-colour cursors,
+     * because the cursor's RGB values are never read.
+     */
     class XorCursorEffect : public Effect
     {
         Q_OBJECT
+
     public:
         XorCursorEffect();
         ~XorCursorEffect() override;
@@ -29,28 +41,31 @@ namespace KWin {
 
     private Q_SLOTS:
         void slotMouseChanged(const QPointF &pos, const QPointF &old);
+        void slotCursorShapeChanged();
 
     private:
-        void showCursor();
-        void hideCursor();
-        GLTexture *ensureCursorTexture();
-        void markCursorTextureDirty();
+        // Hide-state management
+        void tryAcquireHide();
+        void releaseHide();
+        bool isHiddenByOtherEffect();
 
-        void ensureBackgroundTexture(const QSize &deviceSize);
+        // Cursor texture
+        GLTexture *cursorTexture();
+        void invalidateCursorTexture();
 
-        // Returns true if the cursor is currently hidden by another effect
-        // (or by KWin itself) in addition to this effect's own hide request.
-        // The probe temporarily removes this effect's hide request to check
-        // whether the platform's hide counter remains above zero.
-        bool isCursorHiddenByOtherEffect() const;
+        // Background capture
+        void ensureBackgroundTexture(const QSize &size);
+
+        // Helpers
+        QRect cursorLogicalRect() const;
 
         std::unique_ptr<GLTexture> m_cursorTexture;
         bool m_cursorTextureDirty = false;
-        bool m_isMouseHidden = false;
 
         std::unique_ptr<GLTexture> m_backgroundTexture;
         QSize m_backgroundTextureSize;
 
+        bool m_hideAcquired = false;
         QRect m_lastCursorRect;
     };
 
