@@ -13,9 +13,6 @@
 #include <QImage>
 #include <QOpenGLContext>
 
-#include <KConfigGroup>
-#include <KSharedConfig>
-
 namespace KWin {
 
     // ---------------------------------------------------------------------------
@@ -187,22 +184,22 @@ void XorCursorEffect::hideCursor()
     }
 }
 
-qreal XorCursorEffect::cursorMagnification() const
+bool XorCursorEffect::isCursorHiddenByOtherEffect() const
 {
-    // Ask KWin whether the shake cursor effect is currently magnifying the
-    // cursor. If it is, the XOR cursor must be drawn at the same
-    // magnification, otherwise the inverted region would not cover the
-    // magnified cursor.
-    Effect *shakeEffect = effects->findEffect(QStringLiteral("shakecursor"));
-    if (!shakeEffect || !shakeEffect->isActive()) {
-        return 1.0;
-    }
-
-    // The shake effect reads its magnification from the
-    // "Effect-shakecursor" config group. Read the same value so the XOR
-    // cursor follows the magnified cursor's target size.
-    const KConfigGroup config = effects->config()->group(QStringLiteral("Effect-shakecursor"));
-    return config.readEntry("Magnification", 3.0);
+    // Temporarily remove this effect's hide request and check whether
+    // the cursor remains hidden. If it does, another effect (or KWin
+    // itself) is hiding the cursor.
+    //
+    // This is safe because the platform uses a simple counter: calling
+    // showCursor() then hideCursor() within the same frame decrements
+    // and re-increments the counter without triggering the actual
+    // doShowCursor()/doHideCursor() calls unless the counter reaches
+    // zero. Even in the worst case, the show/hide pair occurs before
+    // any rendering, so no visible flicker should occur.
+    effects->showCursor();
+    const bool hiddenByOther = effects->isCursorHidden();
+    effects->hideCursor();
+    return hiddenByOther;
 }
 
 void XorCursorEffect::ensureBackgroundTexture(const QSize &deviceSize)
@@ -228,17 +225,24 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
                                   const Region &deviceRegion,
                                   LogicalOutput *screen)
 {
-    // Re-hide the cursor on every frame. If the shake cursor effect's
-    // deflation animation finished between frames, it may have called
-    // effects->showCursor(), which would make the system cursor visible
-    // again even though we still want it hidden.
-    if (m_isMouseHidden) {
-        effects->hideCursor();
-    }
-
     effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
 
     if (!m_isMouseHidden) {
+        return;
+    }
+
+    // Ensure the cursor is actually hidden. If another effect has shown
+    // it (e.g., by calling showCursor() without a matching hideCursor()),
+    // re-hide it so our XOR cursor doesn't conflict with a visible
+    // system cursor.
+    if (!effects->isCursorHidden()) {
+        effects->hideCursor();
+    }
+
+    // If another effect has also hidden the cursor (e.g., the shake
+    // cursor effect magnifying the cursor, or the zoom effect), skip
+    // drawing our XOR cursor so we don't conflict with their rendering.
+    if (isCursorHiddenByOtherEffect()) {
         return;
     }
 
@@ -248,17 +252,8 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     }
 
     const auto cursor = effects->cursorImage();
-    const qreal magnification = cursorMagnification();
-    m_lastMagnification = magnification;
-
-    // The shake cursor effect scales the cursor around its hotspot: the
-    // hotspot stays anchored at the pointer position while the rest of the
-    // cursor expands around it. We reproduce that by scaling both the size
-    // and the hotspot offset.
-    const QSizeF baseSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-    const QSizeF cursorSize = baseSize * magnification;
-    const QPointF hotspot = cursor.hotSpot() * magnification;
-    const QPointF p = effects->cursorPos() - hotspot;
+    const QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
+    const QPointF p = effects->cursorPos() - cursor.hotSpot();
 
     m_lastCursorRect = QRectF(p, cursorSize).toAlignedRect();
 
@@ -273,6 +268,12 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
 
     effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 
+    // -----------------------------------------------------------------------
+    // Capture the background behind the cursor. KWin's RenderTarget
+    // framebuffer is addressed top-down relative to the render viewport, so
+    // deviceRect.y() is the correct source Y for glCopyTexSubImage2D — no
+    // vertical conversion is needed.
+    // -----------------------------------------------------------------------
     ensureBackgroundTexture(deviceSize);
     if (m_backgroundTexture) {
         glActiveTexture(GL_TEXTURE1);
@@ -321,9 +322,8 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     mvp.translate(p.x() * scale, p.y() * scale);
     shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
 
-    // Draw a textured quad. The cursor texture is sampled with (0,0) at the
-    // top-left of the image, matching KWin's GLTexture convention. The quad
-    // is larger when the shake cursor effect is magnifying.
+    // Draw a textured quad using KWin's modern GLVertexBuffer API.
+    // KWin's convention: texcoord (0, 0) is the top-left of the source image.
     const QSizeF size = cursorSize * scale;
     const QRectF rect(0.0, 0.0, size.width(), size.height());
 
@@ -357,22 +357,11 @@ void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
 {
     if (pos != old) {
         const auto cursor = effects->cursorImage();
-        const qreal magnification = cursorMagnification();
+        const QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
 
-        // Use the magnification from the last frame for the old rect, so
-        // that if the magnification changed (shake started or ended), the
-        // correct region is repainted.
-        const QSizeF baseSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-        const QSizeF oldSize = baseSize * m_lastMagnification;
-        const QSizeF newSize = baseSize * magnification;
+        const QRect newRect = QRectF(pos - cursor.hotSpot(), cursorSize).toAlignedRect();
 
-        const QPointF oldHotspot = cursor.hotSpot() * m_lastMagnification;
-        const QPointF newHotspot = cursor.hotSpot() * magnification;
-
-        const QRect oldRect = QRectF(old - oldHotspot, oldSize).toAlignedRect();
-        const QRect newRect = QRectF(pos - newHotspot, newSize).toAlignedRect();
-
-        effects->addRepaint(KWin::Rect(oldRect));
+        effects->addRepaint(KWin::Rect(m_lastCursorRect));
         effects->addRepaint(KWin::Rect(newRect));
     }
 }
