@@ -13,6 +13,9 @@
 #include <QImage>
 #include <QOpenGLContext>
 
+#include <KConfigGroup>
+#include <KSharedConfig>
+
 namespace KWin {
 
     // ---------------------------------------------------------------------------
@@ -78,11 +81,6 @@ static bool useModernGlsl()
 // and writes `texcoord0 = texcoord.st;`. It does NOT use gl_TexCoord, so we
 // must sample with `texcoord0`. The fragment shader must declare
 // `uniform sampler2D sampler;` and the `texcoord0` varying itself.
-//
-// KWin's GLTexture::upload keeps the top row of the image at texture row 0,
-// and KWin's RenderTarget framebuffer is likewise addressed top-down when
-// glCopyTexSubImage2D reads it, so both the cursor and the background
-// textures are sampled with the same texcoord0 and line up naturally.
 // ---------------------------------------------------------------------------
 
 // GLSL 1.10 / ES 1.00 variant (used when the context GLSL version < 1.40)
@@ -189,6 +187,24 @@ void XorCursorEffect::hideCursor()
     }
 }
 
+qreal XorCursorEffect::cursorMagnification() const
+{
+    // Ask KWin whether the shake cursor effect is currently magnifying the
+    // cursor. If it is, the XOR cursor must be drawn at the same
+    // magnification, otherwise the inverted region would not cover the
+    // magnified cursor.
+    Effect *shakeEffect = effects->findEffect(QStringLiteral("shakecursor"));
+    if (!shakeEffect || !shakeEffect->isActive()) {
+        return 1.0;
+    }
+
+    // The shake effect reads its magnification from the
+    // "Effect-shakecursor" config group. Read the same value so the XOR
+    // cursor follows the magnified cursor's target size.
+    const KConfigGroup config = effects->config()->group(QStringLiteral("Effect-shakecursor"));
+    return config.readEntry("Magnification", 3.0);
+}
+
 void XorCursorEffect::ensureBackgroundTexture(const QSize &deviceSize)
 {
     if (m_backgroundTexture && m_backgroundTextureSize == deviceSize) {
@@ -212,6 +228,14 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
                                   const Region &deviceRegion,
                                   LogicalOutput *screen)
 {
+    // Re-hide the cursor on every frame. If the shake cursor effect's
+    // deflation animation finished between frames, it may have called
+    // effects->showCursor(), which would make the system cursor visible
+    // again even though we still want it hidden.
+    if (m_isMouseHidden) {
+        effects->hideCursor();
+    }
+
     effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
 
     if (!m_isMouseHidden) {
@@ -224,8 +248,17 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     }
 
     const auto cursor = effects->cursorImage();
-    const QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-    const QPointF p = effects->cursorPos() - cursor.hotSpot();
+    const qreal magnification = cursorMagnification();
+    m_lastMagnification = magnification;
+
+    // The shake cursor effect scales the cursor around its hotspot: the
+    // hotspot stays anchored at the pointer position while the rest of the
+    // cursor expands around it. We reproduce that by scaling both the size
+    // and the hotspot offset.
+    const QSizeF baseSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
+    const QSizeF cursorSize = baseSize * magnification;
+    const QPointF hotspot = cursor.hotSpot() * magnification;
+    const QPointF p = effects->cursorPos() - hotspot;
 
     m_lastCursorRect = QRectF(p, cursorSize).toAlignedRect();
 
@@ -240,12 +273,6 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
 
     effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
 
-    // -----------------------------------------------------------------------
-    // Capture the background behind the cursor. KWin's RenderTarget
-    // framebuffer is addressed top-down relative to the render viewport, so
-    // deviceRect.y() is the correct source Y for glCopyTexSubImage2D — no
-    // vertical conversion is needed.
-    // -----------------------------------------------------------------------
     ensureBackgroundTexture(deviceSize);
     if (m_backgroundTexture) {
         glActiveTexture(GL_TEXTURE1);
@@ -294,8 +321,9 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     mvp.translate(p.x() * scale, p.y() * scale);
     shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
 
-    // Draw a textured quad using KWin's modern GLVertexBuffer API.
-    // KWin's convention: texcoord (0, 0) is the top-left of the source image.
+    // Draw a textured quad. The cursor texture is sampled with (0,0) at the
+    // top-left of the image, matching KWin's GLTexture convention. The quad
+    // is larger when the shake cursor effect is magnifying.
     const QSizeF size = cursorSize * scale;
     const QRectF rect(0.0, 0.0, size.width(), size.height());
 
@@ -329,11 +357,22 @@ void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
 {
     if (pos != old) {
         const auto cursor = effects->cursorImage();
-        const QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
+        const qreal magnification = cursorMagnification();
 
-        const QRect newRect = QRectF(pos - cursor.hotSpot(), cursorSize).toAlignedRect();
+        // Use the magnification from the last frame for the old rect, so
+        // that if the magnification changed (shake started or ended), the
+        // correct region is repainted.
+        const QSizeF baseSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
+        const QSizeF oldSize = baseSize * m_lastMagnification;
+        const QSizeF newSize = baseSize * magnification;
 
-        effects->addRepaint(KWin::Rect(m_lastCursorRect));
+        const QPointF oldHotspot = cursor.hotSpot() * m_lastMagnification;
+        const QPointF newHotspot = cursor.hotSpot() * magnification;
+
+        const QRect oldRect = QRectF(old - oldHotspot, oldSize).toAlignedRect();
+        const QRect newRect = QRectF(pos - newHotspot, newSize).toAlignedRect();
+
+        effects->addRepaint(KWin::Rect(oldRect));
         effects->addRepaint(KWin::Rect(newRect));
     }
 }

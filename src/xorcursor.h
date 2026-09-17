@@ -38,6 +38,11 @@ namespace KWin {
 
         void ensureBackgroundTexture(const QSize &deviceSize);
 
+        // Returns the current magnification factor:
+        // 1.0 when the shake cursor effect is inactive, or the configured
+        // magnification value when it is magnifying.
+        qreal cursorMagnification() const;
+
         std::unique_ptr<GLTexture> m_cursorTexture;
         bool m_cursorTextureDirty = false;
         bool m_isMouseHidden = false;
@@ -46,6 +51,7 @@ namespace KWin {
         QSize m_backgroundTextureSize;
 
         QRect m_lastCursorRect;
+        qreal m_lastMagnification = 1.0;
     };
 
 } // namespace KWin
