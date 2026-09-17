@@ -18,8 +18,6 @@ namespace KWin
 		explicit XorCursorEffectConfig(QObject *parent, const KPluginMetaData &data);
 		~XorCursorEffectConfig() override;
 
-		void save() override;
-
 	private:
 		Ui::XorCursorEffectConfigForm m_ui;
 	};

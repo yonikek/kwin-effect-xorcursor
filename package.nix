@@ -4,10 +4,6 @@
 , ninja
 , pkg-config
 
-# KDE Frameworks 6 and Qt 6 — everything KDE-related comes from the
-# `kdePackages` scope. Top-level aliases (kwin, kcmutils, ki18n,
-# extra-cmake-modules, ...) have been removed from nixpkgs since KDE Gear 5
-# and Plasma 5 reached end of life.
 , kdePackages
 , qt6
 }:
@@ -22,23 +18,21 @@ stdenv.mkDerivation (finalAttrs: {
     cmake
     ninja
     pkg-config
-    kdePackages.extra-cmake-modules        # ECM CMake modules
-    qt6.qttools                            # uic, invoked by ki18n_wrap_ui()
-    kdePackages.kconfig                    # kconfig_compiler
+    kdePackages.extra-cmake-modules
+    qt6.qttools
+    kdePackages.kconfig
   ];
 
   buildInputs = [
-    kdePackages.kwin                       # KWin::kwin
-    kdePackages.kcmutils                   # KCModule, KConfigDialogManager
-    kdePackages.ki18n                      # ki18n_wrap_ui(), KF6::I18n
-    kdePackages.kconfig                    # KF6::ConfigCore
-    kdePackages.kcoreaddons                # KF6::CoreAddons
-    qt6.qtbase                             # Qt6::DBus, QDBusConnection
+    kdePackages.kwin
+    kdePackages.kcmutils
+    kdePackages.ki18n
+    kdePackages.kconfig
+    kdePackages.kcoreaddons
+    qt6.qtbase
   ];
 
-  # This derivation produces two Qt plugin modules (.so files loaded at
-  # runtime by KWin), not executables. There is no bin/ directory for
-  # wrapQtAppsHook to operate on, so opt out of the qtPreHook safety check.
+  # Plugin modules, not executables — no bin/ directory to wrap.
   dontWrapQtApps = true;
 
   cmakeFlags = [
