@@ -43,17 +43,22 @@ stdenv.mkDerivation (finalAttrs: {
 
   doCheck = false;
 
+  # The install path is lib/qt-6/plugins/kwin/... with
+  # KDE_INSTALL_USE_QT_SYS_PATHS=ON on KF6, and lib/plugins/kwin/... with
+  # it off. Rather than hard-code either, locate the files with find() so
+  # the checks survive layout changes across KF6 versions.
   postInstall = ''
-    if [ -d "$out/plugins/kwin" ] && [ ! -e "$out/lib/plugins/kwin" ]; then
-      mkdir -p "$out/lib/plugins"
-      mv "$out/plugins/kwin" "$out/lib/plugins/kwin"
-      rmdir "$out/plugins" 2>/dev/null || true
-    fi
+    effect_so=$(find "$out" -name 'xorcursor.so'          -print -quit)
+    config_so=$(find "$out" -name 'kwin_xorcursor_config.so' -print -quit)
 
-    test -f "$out/lib/plugins/kwin/effects/plugins/xorcursor.so" \
-      || (echo "ERROR: effect plugin not installed" && exit 1)
-    test -f "$out/lib/plugins/kwin/effects/configs/kwin_xorcursor_config.so" \
-      || (echo "ERROR: config KCM not installed" && exit 1)
+    if [ -z "$effect_so" ]; then
+      echo "ERROR: effect plugin not installed" >&2
+      exit 1
+    fi
+    if [ -z "$config_so" ]; then
+      echo "ERROR: config KCM not installed" >&2
+      exit 1
+    fi
   '';
 
   meta = with lib; {
