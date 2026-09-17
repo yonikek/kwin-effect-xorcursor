@@ -36,6 +36,11 @@ stdenv.mkDerivation (finalAttrs: {
     qt6.qtbase                             # Qt6::DBus, QDBusConnection
   ];
 
+  # This derivation produces two Qt plugin modules (.so files loaded at
+  # runtime by KWin), not executables. There is no bin/ directory for
+  # wrapQtAppsHook to operate on, so opt out of the qtPreHook safety check.
+  dontWrapQtApps = true;
+
   cmakeFlags = [
     "-DCMAKE_BUILD_TYPE=Release"
     "-DKDE_INSTALL_USE_QT_SYS_PATHS=ON"
