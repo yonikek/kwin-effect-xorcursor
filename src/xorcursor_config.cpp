@@ -7,6 +7,7 @@
 #include "kwineffects_interface.h"
 
 #include <KPluginFactory>
+#include <KSharedConfig>
 
 #include <QDBusConnection>
 
@@ -20,6 +21,10 @@ namespace KWin
 	{
 		m_ui.setupUi(widget());
 
+		// Prefer the effect handler's config object so the KCM and the running
+		// effect read and write the same file. If `effects` isn't visible here
+		// in your build, replace with:
+		//     KSharedConfig::openConfig(QStringLiteral("kwinrc"))
 		XorCursorConfig::instance(effects->config());
 		addConfig(XorCursorConfig::self(), widget());
 	}
@@ -38,4 +43,4 @@ namespace KWin
 
 } // namespace KWin
 
-#include "moc_xorcursor_config.cpp"
+#include "xorcursor_config.moc"
