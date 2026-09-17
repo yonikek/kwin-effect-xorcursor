@@ -1,22 +1,37 @@
 {
-  description = "XOR cursor effect for KDE Plasma";
+  description = "KWin XOR cursor effect";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    utils.url = "github:numtide/flake-utils";
+    flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, ... }@inputs: inputs.utils.lib.eachSystem [
-    "x86_64-linux" "aarch64-linux"
-  ] (system: let
-    pkgs = import nixpkgs {
-      inherit system;
-    };
-  in rec {
-    packages.default = pkgs.kdePackages.callPackage ./package.nix { };
+  outputs = { self, nixpkgs, flake-utils }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = import nixpkgs {
+          inherit system;
+          # Required if you depend on any unfree packages. Harmless otherwise.
+          config.allowUnfree = true;
+        };
+      in
+      {
+        packages = {
+          default = pkgs.callPackage ./package.nix { };
+          xorcursor = pkgs.callPackage ./package.nix { };
+        };
 
-    devShells.default = pkgs.mkShell {
-      inputsFrom = [ packages.default ];
-    };
-  });
+        # `nix develop` shell for working on the effect locally. Mirrors the
+        # build inputs plus a few conveniences.
+        devShells.default = pkgs.mkShell {
+          inputsFrom = [ self.packages.${system}.default ];
+          packages = with pkgs; [
+            cmake
+            ninja
+            pkg-config
+            clang-tools
+            kdePackages.kconfig
+          ];
+        };
+      });
 }
