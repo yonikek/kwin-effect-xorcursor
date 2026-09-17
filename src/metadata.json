@@ -1,9 +1,19 @@
 {
     "KPlugin": {
-        "Category": "Appearance",
-        "Description": "XOR Cursor",
+        "Id": "xorcursor",
+        "Name": "XOR Cursor",
+        "Description": "Inverts the pixels under the cursor",
+        "Icon": "preferences-desktop-cursors",
+        "Authors": [
+            {
+                "Name": "Jin Liu"
+            }
+        ],
+        "Version": "1.0",
+        "License": "GPL-2.0-or-later",
         "EnabledByDefault": false,
-        "License": "GPL",
-        "Name": "XorCursor"
-    }
+        "Category": "Accessibility"
+    },
+    "X-KDE-ConfigModule": "kwin/effects/configs/kwin_xorcursor_config",
+    "X-KWin-Config-TranslationDomain": "kwin_effects"
 }

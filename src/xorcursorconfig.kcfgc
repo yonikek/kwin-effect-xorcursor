@@ -1,0 +1,5 @@
+File=xorcursor.kcfg
+ClassName=XorCursorConfig
+NameSpace=KWin
+Singleton=true
+Mutators=true

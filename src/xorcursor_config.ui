@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+	<class>KWin::XorCursorEffectConfigForm</class>
+<widget class="QWidget" name="KWin::XorCursorEffectConfigForm">
+	<property name="geometry">
+	<rect>
+	<x>0</x>
+<y>0</y>
+<width>400</width>
+<height>80</height>
+</rect>
+</property>
+<layout class="QVBoxLayout" name="verticalLayout">
+	<item>
+	<widget class="QCheckBox" name="kcfg_SmoothCursor">
+	<property name="text">
+	<string>Use smooth cursor edges</string>
+</property>
+<property name="toolTip">
+	<string>Render the inverting cursor with bilinear filtering (smooth) instead of nearest-neighbour (crisp).</string>
+</property>
+</widget>
+</item>
+<item>
+	<spacer name="verticalSpacer">
+	<property name="orientation">
+	<enum>Qt::Vertical</enum>
+</property>
+<property name="sizeHint" stdset="0">
+	<size>
+	<width>20</width>
+<height>40</height>
+</size>
+</property>
+</spacer>
+</item>
+</layout>
+</widget>
+<resources/>
+<connections/>
+</ui>

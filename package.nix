@@ -22,6 +22,8 @@ stdenv.mkDerivation rec {
   buildInputs = [
     kwin
     qttools
+    kcmutils
+    ki18n
   ];
 
   meta = with lib; {

@@ -15,9 +15,16 @@
 #include <QOpenGLContext>
 #include <QRegularExpression>
 
+#include <KConfigGroup>
+#include <KSharedConfig>
+
 #include <array>
 
 namespace KWin {
+
+    // Config group name. Must match the effect's "Id" in the .json metadata.
+    static constexpr char kConfigGroup[]  = "Effect-xorcursor";
+    static constexpr char kConfigSmooth[] = "SmoothCursor";
 
     // ---------------------------------------------------------------------------
     // GLSL version detection (only used once, at first paint).
@@ -55,12 +62,9 @@ namespace KWin {
 // ---------------------------------------------------------------------------
 // Fragment shaders.
 //
-// `backgroundTexScale` converts the quad's normalized [0,1] texcoord into the
-// sub-rect of the background texture that glCopyTexSubImage2D actually
-// populated. When the background texture is exactly cursor-sized this is
-// (1, 1), i.e. a no-op.
-//
 // `1.0 - x` on a normalized 8-bit channel is bit-exact `x XOR 0xFF`.
+// The sampler filter (NEAREST vs LINEAR) is set on the texture object, not
+// in the shader, so this code is filter-agnostic.
 // ---------------------------------------------------------------------------
 static const char kShaderLegacy[] = R"(
 uniform sampler2D sampler;
@@ -110,6 +114,13 @@ XorCursorEffect::XorCursorEffect()
     connect(effects, &EffectsHandler::mouseChanged,
             this, &XorCursorEffect::slotMouseChanged);
 
+    // KWin calls reconfigure(ReconfigureAll) once after loading the effect,
+    // so m_smoothCursor will be populated before the first paint. We still
+    // set a sane default here for the unlikely case that it isn't.
+    m_smoothCursor = effects->config()
+    ->group(QString::fromLatin1(kConfigGroup))
+    .readEntry(kConfigSmooth, false);
+
     tryAcquireHide();
 }
 
@@ -121,6 +132,25 @@ XorCursorEffect::~XorCursorEffect()
     disconnect(effects, &EffectsHandler::mouseChanged,
                this, &XorCursorEffect::slotMouseChanged);
     releaseHide();
+}
+
+void XorCursorEffect::reconfigure(ReconfigureFlags flags)
+{
+    Q_UNUSED(flags)
+
+    const bool previous = m_smoothCursor;
+    m_smoothCursor = effects->config()
+    ->group(QString::fromLatin1(kConfigGroup))
+    .readEntry(kConfigSmooth, false);
+
+    if (m_smoothCursor != previous) {
+        // Force the cursor texture to be re-uploaded with the new filter
+        // and repaint the cursor region so the change is visible at once.
+        invalidateCursorTexture();
+        if (!m_lastCursorRect.isEmpty()) {
+            effects->addRepaint(Rect(m_lastCursorRect));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +166,6 @@ void XorCursorEffect::tryAcquireHide()
         return;
     }
     if (!cursorTexture()) {
-        // The cursor image isn't ready yet; retry later.
         return;
     }
     effects->hideCursor();
@@ -156,9 +185,6 @@ void XorCursorEffect::releaseHide()
 
 bool XorCursorEffect::isHiddenByOtherEffect()
 {
-    // The platform keeps a ref-counted hide state. Toggle our own request
-    // off and back on to see whether anyone else is keeping it hidden.
-    // Both toggles happen before any frame is committed, so this is safe.
     effects->showCursor();
     const bool hiddenByOther = effects->isCursorHidden();
     effects->hideCursor();
@@ -179,7 +205,7 @@ GLTexture *XorCursorEffect::cursorTexture()
             m_cursorTexture = GLTexture::upload(cursor.image());
             if (m_cursorTexture) {
                 m_cursorTexture->setWrapMode(GL_CLAMP_TO_EDGE);
-                m_cursorTexture->setFilter(GL_NEAREST);
+                m_cursorTexture->setFilter(m_smoothCursor ? GL_LINEAR : GL_NEAREST);
             }
         }
     }
@@ -193,10 +219,6 @@ void XorCursorEffect::invalidateCursorTexture()
 
 // ---------------------------------------------------------------------------
 // Background capture
-//
-// Grow-only: once a texture is allocated, it is reused for any smaller
-// cursor rect. Because the shader samples a sub-rect (via backgroundTexScale)
-// this is transparent to the rest of the pipeline.
 // ---------------------------------------------------------------------------
 
 void XorCursorEffect::ensureBackgroundTexture(const QSize &size)
@@ -221,6 +243,8 @@ void XorCursorEffect::ensureBackgroundTexture(const QSize &size)
     m_backgroundTexture = GLTexture::upload(dummy);
     if (m_backgroundTexture) {
         m_backgroundTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+        // Always NEAREST: we sample the exact pixels behind the cursor,
+        // any smoothing would mix in colours that were never there.
         m_backgroundTexture->setFilter(GL_NEAREST);
     }
 }
@@ -262,7 +286,6 @@ void XorCursorEffect::flushPendingRepaints()
     if (m_pendingDamage.isEmpty()) {
         return;
     }
-    // addRepaint expects a KWin::Region; Region(QRegion) is an exact match.
     effects->addRepaint(Region(m_pendingDamage));
     m_pendingDamage = QRegion();
 }
@@ -277,8 +300,6 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
                                   const Region &deviceRegion,
                                   LogicalOutput *screen)
 {
-    // If we failed to acquire the hide at construction (cursor image not
-    // ready, GL context not current), retry every frame until it works.
     tryAcquireHide();
 
     effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
@@ -287,14 +308,10 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
         return;
     }
 
-    // If some other effect has unbalanced its show/hide calls and the
-    // cursor is visible again, restore our hide before proceeding.
     if (!effects->isCursorHidden()) {
         effects->hideCursor();
     }
 
-    // If another effect is hiding the cursor, defer to it. Erase whatever
-    // we drew last frame so it doesn't linger behind their visual.
     if (isHiddenByOtherEffect()) {
         if (!m_lastCursorRect.isEmpty()) {
             effects->addRepaint(Rect(m_lastCursorRect));
@@ -321,7 +338,6 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
     const QRect deviceRect = deviceRectF.toAlignedRect();
     const QSize deviceSize = deviceRect.size();
 
-    // Capture the background behind the cursor.
     ensureBackgroundTexture(deviceSize);
     if (!m_backgroundTexture) {
         return;
@@ -334,7 +350,6 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
                         deviceSize.width(), deviceSize.height());
     glActiveTexture(GL_TEXTURE0);
 
-    // Lazily build the shader. The GL context is guaranteed current here.
     if (!m_shader) {
         m_useModernGlsl = (parseGlslVersion() >= Version(1, 40));
         const QByteArray source = m_useModernGlsl
@@ -348,7 +363,6 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget,
         return;
     }
 
-    // Save GL blend state so we don't leak it to the rest of the chain.
     const GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
     GLint oldSrc = 0, oldDst = 0;
     glGetIntegerv(GL_BLEND_SRC_ALPHA, &oldSrc);
@@ -412,11 +426,6 @@ void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
     }
 
     const QRect newRect = cursorLogicalRect();
-
-    // Symmetric difference of the old and new cursor rects: the overlap
-    // region was already inverted and remains inverted, so only the two
-    // crescents need to be repainted. If m_lastCursorRect is empty (first
-    // frame after activation), QRegion(empty) XOR anything == anything.
     queueDamage(QRegion(m_lastCursorRect) ^ QRegion(newRect));
 }
 
@@ -428,8 +437,6 @@ void XorCursorEffect::slotCursorShapeChanged()
         return;
     }
 
-    // A shape change is not a symmetric difference: the old and new masks
-    // may differ even where the rects overlap. Damage both fully.
     QRegion damage;
     if (!m_lastCursorRect.isEmpty()) {
         damage |= QRegion(m_lastCursorRect);
