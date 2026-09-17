@@ -262,11 +262,8 @@ void XorCursorEffect::flushPendingRepaints()
     if (m_pendingDamage.isEmpty()) {
         return;
     }
-    // addRepaint accepts QRegion in KWin 6; if your build only exposes the
-    // Rect overload, iterate m_pendingDamage's constituent rects instead.
-    for (const QRect &r : m_pendingDamage) {
-        effects->addRepaint(r);
-    }
+    // addRepaint expects a KWin::Region; Region(QRegion) is an exact match.
+    effects->addRepaint(Region(m_pendingDamage));
     m_pendingDamage = QRegion();
 }
 
