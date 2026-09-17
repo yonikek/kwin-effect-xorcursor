@@ -4,7 +4,6 @@
 , ninja
 , pkg-config
 , extra-cmake-modules
-, wrapQtAppsHook
 
 # KDE Frameworks 6 and Qt 6 — everything KDE-related comes from the
 # `kdePackages` scope because `kwin`, `kcmutils`, etc. are not top-level
@@ -24,13 +23,12 @@ stdenv.mkDerivation (finalAttrs: {
     ninja
     pkg-config
     extra-cmake-modules
-    wrapQtAppsHook
     qt6.qttools                            # uic, invoked by ki18n_wrap_ui()
     kdePackages.kconfig                    # kconfig_compiler
   ];
 
   buildInputs = [
-    kdePackages.kwin                       # KWin::kwin (was top-level `kwin`)
+    kdePackages.kwin                       # KWin::kwin
     kdePackages.kcmutils                   # KCModule, KConfigDialogManager
     kdePackages.ki18n                      # ki18n_wrap_ui(), KF6::I18n
     kdePackages.kconfig                    # KF6::ConfigCore
