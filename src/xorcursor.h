@@ -37,10 +37,18 @@ private:
     GLTexture *ensureCursorTexture();
     void markCursorTextureDirty();
 
+    /**
+     * Returns the bounding rectangle (in logical coordinates) of the currently
+     * painted cursor image, i.e. the area which has XOR-composited pixels that
+     * must be XOR-painted again in order to restore the original content.
+     */
+    QRectF cursorRectLogical() const;
+
     std::unique_ptr<GLTexture> m_cursorTexture;
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
-    QPoint m_cursorPoint;
+    /** Bounding rect of the last painted cursor shape, in logical coordinates. */
+    QRectF m_cursorPaintRect;
 };
 
 } // namespace KWin

@@ -10,6 +10,8 @@
 #include "effect/effecthandler.h"
 #include "opengl/glutils.h"
 
+#include <QRegion>
+
 namespace KWin
 {
 
@@ -49,9 +51,17 @@ void XorCursorEffect::showCursor()
 {
     if (m_isMouseHidden) {
         disconnect(effects, &EffectsHandler::cursorShapeChanged, this, &XorCursorEffect::markCursorTextureDirty);
-        // show the previously hidden mouse-pointer again and free the loaded texture/picture.
+        disconnect(effects, &EffectsHandler::mouseChanged, this, &XorCursorEffect::slotMouseChanged);
+        // the XOR-composited pixels are still inverted on screen; repaint the
+        // last painted cursor area so that the original content is restored
+        // before KWin starts drawing its own cursor again
+        if (!m_cursorPaintRect.isEmpty()) {
+            effects->addRepaint(m_cursorPaintRect.toAlignedRect());
+        }
+        // show the previously hidden mouse-pointer and free the loaded texture/picture.
         effects->showCursor();
         m_cursorTexture.reset();
+        m_cursorPaintRect = QRectF();
         m_isMouseHidden = false;
     }
 }
@@ -69,8 +79,18 @@ void XorCursorEffect::hideCursor()
             connect(effects, &EffectsHandler::cursorShapeChanged, this, &XorCursorEffect::markCursorTextureDirty);
             connect(effects, &EffectsHandler::mouseChanged, this, &XorCursorEffect::slotMouseChanged);
             m_isMouseHidden = true;
+            // force an initial paint of the cursor at its current position
+            effects->addRepaintFull();
         }
     }
+}
+
+QRectF XorCursorEffect::cursorRectLogical() const
+{
+    const auto cursor = effects->cursorImage();
+    const QSizeF size = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
+    const QPointF p = effects->cursorPos() - cursor.hotSpot();
+    return QRectF(p, size);
 }
 
 void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
@@ -84,16 +104,28 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
         return;
     }
 
-    const auto cursor = effects->cursorImage();
-	QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-	const QPointF p = effects->cursorPos() - cursor.hotSpot();
-	const auto scale = viewport.scale();
+    const QSizeF cursorSize = cursorRectLogical().size();
+    const QPointF p = cursorRectLogical().topLeft();
+    const auto scale = viewport.scale();
 
-	// FIX: Scale logical coordinates to device coordinates for the deviceRegion
-	QRectF cursorDeviceRect(p.x() * scale, p.y() * scale, cursorSize.width() * scale, cursorSize.height() * scale);
-	Region cursorRegion = Region(Rect(cursorDeviceRect.toAlignedRect()));
-    effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
-	glEnable(GL_COLOR_LOGIC_OP);
+    // remember where we painted so that the same area can be restored later
+    m_cursorPaintRect = QRectF(p, cursorSize);
+
+    // Only paint if the cursor actually intersects the region being repainted
+    // in this pass. Painting outside of the clip region would leave the
+    // XOR-composited state inconsistent (the previous inversion could not be
+    // undone), which is exactly what this check prevents.
+    const QRectF cursorDeviceRect(p.x() * scale, p.y() * scale, cursorSize.width() * scale, cursorSize.height() * scale);
+    QRegion cursorClip(cursorDeviceRect.toAlignedRect());
+    cursorClip.intersect(deviceRegion);
+    if (cursorClip.isEmpty()) {
+        return;
+    }
+
+    // restrict painting to the intersection of the cursor and the dirty region
+    screen->pushClipRegion(cursorClip);
+
+    glEnable(GL_COLOR_LOGIC_OP);
     glLogicOp(GL_XOR);
     auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture | ShaderTrait::TransformColorspace);
     s->setColorspaceUniforms(ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
@@ -102,7 +134,9 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
     cursorTexture->render(cursorSize * scale);
     ShaderManager::instance()->popShader();
-	glDisable(GL_COLOR_LOGIC_OP);
+    glDisable(GL_COLOR_LOGIC_OP);
+
+    screen->popClipRegion();
 }
 
 bool XorCursorEffect::isActive() const
@@ -112,10 +146,19 @@ bool XorCursorEffect::isActive() const
 
 void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
 {
-    m_cursorPoint = pos.toPoint();
-    if (pos != old) {
-        effects->addRepaintFull();
+    if (pos == old) {
+        return;
     }
+    // Because the cursor is XOR-composited, both the area where the cursor was
+    // previously painted and the area where it will be painted now have to be
+    // repainted: the old one to restore the original pixels, the new one to
+    // invert them. Repainting only these two rectangles instead of the whole
+    // screen massively reduces the amount of work per frame.
+    if (!m_cursorPaintRect.isEmpty()) {
+        effects->addRepaint(m_cursorPaintRect.toAlignedRect());
+    }
+    const QRectF newRect = cursorRectLogical();
+    effects->addRepaint(newRect.toAlignedRect());
 }
 
 } // namespace KWin
