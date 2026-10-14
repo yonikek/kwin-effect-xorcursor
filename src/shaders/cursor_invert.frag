@@ -36,21 +36,16 @@ uniform sampler2D backgroundSampler;
 // unit 1: cursor shape texture (only its alpha channel is used)
 uniform sampler2D cursorSampler;
 
-in vec2 texcoord0;
-
-out vec4 fragColor;
+varying vec2 texcoord0;
 
 void main()
 {
-    // This fragment's position inside the cursor quad, in texture space.
-    const vec2 cursorUv = vec2(texcoord0.x, 1.0 - texcoord0.y);
-
     // Sample the background at exactly this fragment's device position.
     // The vertex shader maps the cursor quad one-to-one onto the viewport,
     // hence gl_FragCoord already points at the right pixel of the full-size
     // background texture bound to backgroundSampler.
     const vec2 bgSize = vec2(textureSize(backgroundSampler, 0));
-    vec4 backdrop = texture(backgroundSampler, gl_FragCoord.xy / bgSize);
+    vec4 backdrop = texture2D(backgroundSampler, gl_FragCoord.xy / bgSize);
 
     // Invert the backdrop like Plasma's invert effect does, but in linear
     // light so the operation stays correct on wide-gamut / HDR outputs.
@@ -66,7 +61,9 @@ void main()
     // Use the cursor's alpha as a coverage mask: opaque pixels show the
     // fully inverted backdrop, translucent edge pixels blend it with the
     // untouched backdrop, transparent pixels leave the backdrop alone.
-    const float coverage = texture(cursorSampler, cursorUv).a;
+    // KWin uploads cursor images without premultiplying them, so the raw
+    // alpha channel is the coverage value directly.
+    const float coverage = texture2D(cursorSampler, texcoord0).a;
 
-    fragColor = mix(backdrop, invertedBackdrop, coverage);
+    gl_FragColor = mix(backdrop, invertedBackdrop, coverage);
 }

@@ -8,7 +8,6 @@
 
 #include "core/colorspace.h"
 #include "effect/effect.h"
-#include "opengl/glshadermanager.h"
 
 namespace KWin
 {
@@ -16,6 +15,7 @@ namespace KWin
 class GLFramebuffer;
 class GLShader;
 class GLTexture;
+class Output;
 
 /**
  * Draws the mouse cursor by inverting the screen content underneath it, in
@@ -44,7 +44,9 @@ public:
     bool isActive() const override;
 
 private Q_SLOTS:
-    void slotMouseChanged(const QPointF &pos, const QPointF &old);
+    void slotMouseChanged(const QPointF &pos, const QPointF &old,
+                          Qt::MouseButtons buttons, Qt::MouseButtons oldButtons,
+                          Qt::KeyboardModifiers modifiers, Qt::KeyboardModifiers oldModifiers);
 
 private:
     void showCursor();
