@@ -8,6 +8,7 @@
 
 #include "core/colorspace.h"
 #include "effect/effect.h"
+#include "opengl/glshadermanager.h"
 
 namespace KWin
 {
@@ -39,7 +40,7 @@ public:
     InvertCursorEffect();
     ~InvertCursorEffect() override;
 
-    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen) override;
+    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const QRegion &region, Output *screen) override;
     bool isActive() const override;
 
 private Q_SLOTS:
@@ -51,11 +52,17 @@ private:
     GLTexture *ensureCursorTexture();
     void markCursorTextureDirty();
     /**
-     * Lazily creates the background grabber FBO that provides the composited
-     * screen content as a texture to the invert shader. Returns nullptr if
-     * the FBO could not be created.
+     * Lazily compiles the invert fragment shader (together with KWin's
+     * standard transform vertex shader). Returns nullptr if the shader
+     * could not be compiled.
      */
-    GLFramebuffer *ensureGrabberFbo(const QSize &size);
+    GLShader *ensureShader();
+    /**
+     * Lazily creates the background grabber FBO that provides the composited
+     * screen content as a texture to the invert shader. After this call,
+     * m_grabberFbo is either valid for the requested @a size or null.
+     */
+    void ensureGrabber(const QSize &size);
 
     /**
      * Returns the bounding rectangle (in logical coordinates) of the
@@ -64,7 +71,14 @@ private:
     QRectF cursorRectLogical() const;
 
     std::unique_ptr<GLTexture> m_cursorTexture;
+    // The grabber FBO does not own its color attachment, so the texture has
+    // to outlive the framebuffer (both are reset together, FBO first).
+    std::unique_ptr<GLTexture> m_grabberTexture;
     std::unique_ptr<GLFramebuffer> m_grabberFbo;
+    std::unique_ptr<GLShader> m_shader;
+    int m_backgroundSamplerLocation = -1;
+    int m_cursorSamplerLocation = -1;
+    QSize m_grabberSize;
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
     /** Bounding rect of the last painted cursor shape, in logical coordinates. */

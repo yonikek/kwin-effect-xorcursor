@@ -8,9 +8,16 @@
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
+#include "opengl/glframebuffer.h"
+#include "opengl/glshader.h"
+#include "opengl/glshadermanager.h"
+#include "opengl/gltexture.h"
 #include "opengl/glutils.h"
-#include "opengl/shader.h"
-#include "opengl/shadermanager.h"
+#include "opengl/glvertexbuffer.h"
+
+#include <epoxy/gl.h>
+
+#include <array>
 
 namespace KWin
 {
@@ -47,27 +54,59 @@ void InvertCursorEffect::markCursorTextureDirty()
     m_cursorTextureDirty = true;
 }
 
-GLFramebuffer *InvertCursorEffect::ensureGrabberFbo(const QSize &size)
+GLShader *InvertCursorEffect::ensureShader()
+{
+    if (!m_shader) {
+        // The fragment shader lives in this plugin's Qt resource (see
+        // qt_add_resources in src/CMakeLists.txt). ShaderManager resolves
+        // its `#include "colormanagement.glsl"` from kwin's own shaders
+        // resource at compile time, exactly like the built-in invert effect
+        // does. Passing an empty vertex source makes ShaderManager generate
+        // the standard transform vertex shader from the given traits, which
+        // also declares all colormanagement uniforms our fragment shader
+        // consumes and provides the `texcoord0` varying.
+        auto s = ShaderManager::instance()->generateCustomShader(ShaderTrait::MapTexture | ShaderTrait::TransformColorspace,
+                                                                  QByteArray(),
+                                                                  QByteArrayLiteral(":/effects/cursor_invert/shaders/cursor_invert.frag"));
+        if (!s || !s->isValid()) {
+            return nullptr;
+        }
+        m_backgroundSamplerLocation = s->uniformLocation("backgroundSampler");
+        m_cursorSamplerLocation = s->uniformLocation("cursorSampler");
+        m_shader = std::move(s);
+    }
+    return m_shader.get();
+}
+
+void InvertCursorEffect::ensureGrabber(const QSize &size)
 {
     // The invert shader needs the already-composited screen content as a
     // texture it can sample from. A grabber FBO does exactly that: blitting
     // the currently bound framebuffer into it copies everything we have
-    // painted so far this frame into m_grabberFbo's color texture (see
-    // GLFramebuffer::grab()).
-    if (!m_grabberFbo || m_grabberFbo->size() != size) {
+    // painted so far this frame into the grabber's color attachment (see
+    // GLFramebuffer::blitFromRenderTarget()).
+    if (!m_grabberFbo || m_grabberSize != size) {
         m_grabberFbo.reset();
+        m_grabberTexture.reset();
+        m_grabberSize = QSize();
         if (size.isEmpty()) {
-            return nullptr;
+            return;
         }
-        m_grabberFbo = std::make_unique<GLFramebuffer>(size);
-        m_grabberFbo->attachColorTarget(make_unique<GLTexture>(GL_RGBA8, TextureTargetDefault), 0);
-        if (!m_grabberFbo->isValid()) {
+        m_grabberTexture = GLTexture::allocate(GL_RGBA8, size);
+        if (!m_grabberTexture) {
+            return;
+        }
+        m_grabberTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+        m_grabberFbo = std::make_unique<GLFramebuffer>(m_grabberTexture.get());
+        if (!m_grabberFbo->valid()) {
+            // GLFramebuffer doesn't take ownership of a broken attachment
+            // either way; drop both and retry on the next paint pass.
             m_grabberFbo.reset();
-            return nullptr;
+            m_grabberTexture.reset();
+            return;
         }
-        m_grabberFbo->colorTexture()->setWrapMode(GL_CLAMP_TO_EDGE);
+        m_grabberSize = size;
     }
-    return m_grabberFbo.get();
 }
 
 void InvertCursorEffect::showCursor()
@@ -82,10 +121,13 @@ void InvertCursorEffect::showCursor()
             const QRect r = m_cursorPaintRect.toAlignedRect();
             effects->addRepaint(r.x(), r.y(), r.width(), r.height());
         }
-        // show the previously hidden mouse-pointer and free the loaded texture/FBO.
+        // show the previously hidden mouse-pointer and free the loaded resources.
         effects->showCursor();
         m_cursorTexture.reset();
         m_grabberFbo.reset();
+        m_grabberTexture.reset();
+        m_grabberSize = QSize();
+        m_shader.reset();
         m_cursorPaintRect = QRectF();
         m_isMouseHidden = false;
     }
@@ -118,14 +160,18 @@ QRectF InvertCursorEffect::cursorRectLogical() const
     return QRectF(p, size);
 }
 
-void InvertCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
+void InvertCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const QRegion &region, Output *screen)
 {
-    effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
+    effects->paintScreen(renderTarget, viewport, mask, region, screen);
     if (!m_isMouseHidden) {
         return;
     }
     GLTexture *cursorTexture = ensureCursorTexture();
     if (!cursorTexture) {
+        return;
+    }
+    GLShader *shader = ensureShader();
+    if (!shader) {
         return;
     }
 
@@ -140,8 +186,8 @@ void InvertCursorEffect::paintScreen(const RenderTarget &renderTarget, const Ren
     // in this pass. Painting outside of the dirty region would leave the
     // inverted state inconsistent (the previous inversion could not be
     // undone by the next frame), which is exactly what this check prevents.
-    const QRectF cursorDeviceRect(p.x() * scale, p.y() * scale, cursorSize.width() * scale, cursorSize.height() * scale);
-    if (!deviceRegion.intersects(Rect(cursorDeviceRect.toAlignedRect()))) {
+    const QRectF cursorDeviceRect = scaledRect(m_cursorPaintRect, scale);
+    if (!region.intersects(cursorDeviceRect.toAlignedRect())) {
         return;
     }
 
@@ -149,61 +195,62 @@ void InvertCursorEffect::paintScreen(const RenderTarget &renderTarget, const Ren
     // the pixels underneath the cursor. This replaces the old fixed-function
     // GL_COLOR_LOGIC_OP/GL_XOR approach with a modern shader pass.
     const QSize grabSize = renderTarget.size() * scale;
-    GLFramebuffer *grabber = ensureGrabberFbo(grabSize);
-    if (!grabber) {
+    ensureGrabber(grabSize);
+    if (!m_grabberFbo) {
         return;
     }
-    // Read from the currently bound framebuffer (the one effects->paintScreen()
-    // just rendered into) and write into the grabber's color texture, then
-    // restore the render target as the drawing destination.
-    grabber->grab();
+    // Blit the dirty region of the framebuffer effects->paintScreen() just
+    // rendered into (the currently bound one) onto the identically sized
+    // area of the grabber's color attachment, then restore the render
+    // target as the drawing destination.
+    GLFramebuffer::pushFramebuffer(m_grabberFbo.get());
+    m_grabberFbo->blitFromRenderTarget(renderTarget, viewport, region.boundingRect(), region.boundingRect());
+    GLFramebuffer::popFramebuffer();
 
-    // The vertex shader is KWin's standard TransformVertexShader (identical
-    // to the one used by ShaderTrait::TransformTextureWithoutCoords); the
-    // fragment shader implements the actual inversion (see
-    // shaders/cursor_invert.fragment), and is compiled into this plugin's
-    // Qt resource by src/CMakeLists.txt (see qt_add_resources there).
-    static const QByteArray vertexSource = QByteArrayLiteral(R"(
-        #version 140
+    ShaderManager::instance()->pushShader(shader);
 
-        uniform mat4 ModelViewProjectionMatrix;
+    // The grabbed image holds the framebuffer's encoded values; run them
+    // through the colorspace conversion uniforms so the inversion happens
+    // in linear light (src == dst for the usual case, but the nits-based
+    // round trip keeps HDR/wide-gamut outputs correct).
+    shader->setColorspaceUniforms(renderTarget.colorDescription(), renderTarget.colorDescription(), RenderingIntent::Perceptual);
 
-        in vec3 position;
-        in vec2 texcoord0;
-
-        out vec2 texcoord;
-
-        void main()
-        {
-            gl_Position = ModelViewProjectionMatrix * vec4(position.x, position.y, 1.0);
-            texcoord = texcoord0;
-        }
-    )");
-    auto s = ShaderManager::instance()->pushShader(vertexSource, ":/kwin/effects/cursor_invert/shaders/cursor_invert.fragment");
-    if (!s->isValid()) {
-        ShaderManager::instance()->popShader();
-        return;
-    }
-
-    // The grabbed image holds the framebuffer's encoded values interpreted as
-    // unorms; sample it in the framebuffer colorspace and re-encode for the
-    // render target we are drawing back into (usually the same).
-    s->setColorspaceUniforms(renderTarget.colorDescription(), renderTarget.colorDescription(), RenderingIntent::Perceptual);
-
-    QMatrix4x4 mvp = viewport.projectionMatrix();
-    mvp.translate(p.x() * scale, p.y() * scale);
-    s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
+    // Draw the cursor quad directly in device coordinates via an ortho
+    // projection, because the fragment shader samples the backdrop through
+    // gl_FragCoord and needs the quad mapped one-to-one onto the framebuffer.
+    QMatrix4x4 mat;
+    mat.ortho(QRectF(QPointF(), QSizeF(grabSize)));
+    mat.scale(1, -1); // undo ortho()'s y flip so top-left origin matches the viewport convention
+    shader->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mat);
 
     // unit 0: freshly grabbed background, unit 1: the cursor shape
-    s->setUniform("BackgroundTextureUnit", 0);
-    s->setUniform("CursorTextureUnit", 1);
-    grabber->colorTexture()->bind(0);
-    cursorTexture->bind(1);
+    glActiveTexture(GL_TEXTURE0);
+    m_grabberTexture->bind();
+    shader->setUniform(m_backgroundSamplerLocation, 0);
+    glActiveTexture(GL_TEXTURE1);
+    cursorTexture->bind();
+    shader->setUniform(m_cursorSamplerLocation, 1);
 
     // Unlike XOR, the inversion is performed entirely inside the fragment
     // shader and fully masked by the cursor's alpha channel, so no special
     // blending or logic ops are required and any cursor colour works.
-    s->draw(cursorSize * scale);
+    std::array<GLVertex2D, 6> quad = {{
+        // first triangle
+        GLVertex2D{QVector2D(cursorDeviceRect.left(), cursorDeviceRect.top()), QVector2D(0.0, 1.0)},
+        GLVertex2D{QVector2D(cursorDeviceRect.right(), cursorDeviceRect.bottom()), QVector2D(1.0, 0.0)},
+        GLVertex2D{QVector2D(cursorDeviceRect.left(), cursorDeviceRect.bottom()), QVector2D(0.0, 0.0)},
+        // second triangle
+        GLVertex2D{QVector2D(cursorDeviceRect.left(), cursorDeviceRect.top()), QVector2D(0.0, 1.0)},
+        GLVertex2D{QVector2D(cursorDeviceRect.right(), cursorDeviceRect.top()), QVector2D(1.0, 1.0)},
+        GLVertex2D{QVector2D(cursorDeviceRect.right(), cursorDeviceRect.bottom()), QVector2D(1.0, 0.0)},
+    }};
+
+    GLVertexBuffer *vbo = GLVertexBuffer::streamingBuffer();
+    vbo->reset();
+    vbo->setVertices(quad);
+    vbo->render(GL_TRIANGLES);
+
+    glActiveTexture(GL_TEXTURE0);
     ShaderManager::instance()->popShader();
 }
 
