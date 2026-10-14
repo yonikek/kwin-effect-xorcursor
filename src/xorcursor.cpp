@@ -27,23 +27,28 @@ namespace KWin
  * current framebuffer contents are read back from an additional sampler
  * ("screenSampler") bound to texture unit 1.
  *
- * The math works in *straight* (un-premultiplied) color space, which makes it
- * independent of the cursor's actual colors - any standard cursor theme works,
- * not just white ones:
+ * The math is independent of the cursor's actual colors - any standard cursor
+ * theme works, not just white ones. Only the cursor's alpha channel is used,
+ * as a binary coverage mask:
  *
- *   c  = unpremultiply(cursor.rgb / cursor.a)   (displayed cursor color)
- *   x  = |screen - W|                            (XOR-style inversion,
- *                                                 W = white reference level)
- *   out = mix(screen, x, a)                      (per-pixel coverage blend)
+ *   x   = clamp(W - clamp(screen, 0, W), 0, W)   (XOR-style inversion around
+ *                                                 the white reference level W)
+ *   out = mix(screen, x, step(epsilon, a))       (invert where the cursor
+ *                                                 covers, keep elsewhere)
  *
  * Key properties:
- *  - The blend factor is the raw coverage alpha only; the cursor's RGB never
- *    enters the result except through the inversion-free identity path. This
- *    means the operation is exactly its own inverse when applied twice over
- *    the same area with the same alpha coverage - repainting the old bounding
- *    box restores the original screen content, just like XOR did.
- *  - Fully transparent pixels (a == 0) leave the screen untouched, fully
- *    opaque pixels invert it, anti-aliased edge pixels blend linearly.
+ *  - Only the cursor's coverage (alpha) matters; its RGB never enters the
+ *    result, so every cursor theme inverts identically. Where the cursor is
+ *    opaque the screen is inverted, and since the inversion is its own
+ *    inverse, repainting the same area with the same coverage restores the
+ *    original screen content, just like XOR did.
+ *  - Fully transparent pixels (a == 0) leave the screen untouched. This also
+ *    fixes the "white bounding box" artifact: premultiplied transparent pixels
+ *    sample as black (rgb = 0), and inverting them would produce white; with
+ *    the coverage test they are skipped entirely.
+ *  - The clamps keep the inverted value inside [0, W] so partially transparent
+ *    (anti-aliased) source pixels - whose premultiplied rgb can exceed their
+ *    alpha - cannot blow past the white reference level either.
  *  - No GL_COLOR_LOGIC_OP required, so this also works on OpenGL ES and
  *    modern core profiles.
  *
@@ -65,11 +70,20 @@ void main(void)
     vec4 cursor = texture(sampler, texcoord0);
     vec4 screen = texture(screenSampler, texcoord0);
     float a = clamp(cursor.a, 0.0, 1.0);
-    // XOR-style inversion of the screen around the white reference level
-    vec3 inverted = abs(screen.rgb - vec3(invSdrWhite));
+    // coverage test: only invert where the cursor actually covers pixels;
+    // fully transparent (premultiplied-black) texels must be skipped so the
+    // bounding box doesn't turn into an inverted rectangle
+    if (a <= 0.0001) {
+        fragColor = screen;
+        return;
+    }
+    // XOR-style inversion of the screen around the white reference level,
+    // clamped to [0, invSdrWhite]
+    vec3 bg = clamp(screen.rgb, 0.0, vec3(invSdrWhite));
+    vec3 inverted = clamp(bg - screen.rgb, 0.0, vec3(invSdrWhite));
     // coverage-only blend: independent of the cursor's own colors, and
     // applying it twice restores the original screen content
-    fragColor = vec4(mix(screen.rgb, inverted, a), screen.a);
+    fragColor = vec4(inverted, screen.a);
 }
 )");
 
