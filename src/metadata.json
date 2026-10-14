@@ -1,9 +1,9 @@
 {
     "KPlugin": {
         "Category": "Appearance",
-        "Description": "XOR Cursor",
+        "Description": "Invert the screen content underneath the cursor (shader-based replacement for an XOR cursor)",
         "EnabledByDefault": false,
         "License": "GPL",
-        "Name": "XorCursor"
+        "Name": "Invert Cursor"
     }
 }
