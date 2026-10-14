@@ -8,6 +8,7 @@
 
 #include "core/colorspace.h"
 #include "effect/effect.h"
+#include "opengl/glshader.h"
 
 namespace KWin
 {
@@ -15,7 +16,6 @@ namespace KWin
 class GLFramebuffer;
 class GLTexture;
 class GLVertexBuffer;
-class GLShader;
 
 class XorCursorEffect : public Effect
 {
@@ -48,6 +48,10 @@ private:
     std::unique_ptr<GLTexture> m_cursorTexture;
     /** Cached pure-white premultiplied alpha mask used by the XOR shader. */
     std::unique_ptr<GLTexture> m_xorMaskTexture;
+    /** Cached shader implementing the XOR inversion (built lazily). */
+    std::unique_ptr<Shader> m_xorShader;
+    TextureUniform *m_screenUniform = nullptr; // owned by m_xorShader
+    FloatUniform *m_invSdrWhiteUniform = nullptr; // owned by m_xorShader
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
     /** Bounding rect of the last painted cursor shape, in logical coordinates. */

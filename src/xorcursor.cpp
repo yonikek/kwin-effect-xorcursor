@@ -8,7 +8,6 @@
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
-#include "kwin_enums.h"
 #include "opengl/glshader.h"
 #include "opengl/glshadermanager.h"
 #include "opengl/glutils.h"
@@ -136,6 +135,11 @@ void XorCursorEffect::showCursor()
         effects->showCursor();
         m_cursorTexture.reset();
         m_xorMaskTexture.reset();
+        // drop the cached shader too: its TextureUniform references the mask
+        // texture we just released, so it must not outlive it
+        m_xorShader.reset();
+        m_screenUniform = nullptr;
+        m_invSdrWhiteUniform = nullptr;
         m_cursorPaintRect = QRectF();
         m_isMouseHidden = false;
     }
@@ -210,21 +214,42 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
         return;
     }
 
-    auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture);
-    s->add(std::make_unique<XorShaderFragment>());
-    s->addUniform(std::make_unique<TextureUniform>(GL_TEXTURE_2D,
-                                                   m_xorMaskTexture.get(),
-                                                   m_xorMaskTexture->size(),
-                                                   QStringLiteral("screen")));
+    // The shader is cached by ShaderManager keyed on its fragment + uniform
+    // setup, so build it once and reuse it across frames instead of pushing
+    // a freshly-constructed shader (and duplicate uniforms) every paint pass.
+    if (!m_xorShader) {
+        m_xorShader = std::make_unique<Shader>();
+        m_xorShader->add(std::make_unique<XorShaderFragment>());
+        // the mask texture is only sampled through this uniform, so it must be
+        // part of the shader's uniform set; the concrete texture is swapped in
+        // per-draw via TextureUniform::rebind()
+        m_screenUniform = new TextureUniform(GL_TEXTURE_2D,
+                                             m_xorMaskTexture.get(),
+                                             m_xorMaskTexture->size(),
+                                             QStringLiteral("screen"));
+        m_xorShader->addUniform(std::unique_ptr<TextureUniform>(m_screenUniform));
+        m_invSdrWhiteUniform = new FloatUniform(QStringLiteral("invSdrWhite"), QOpenGLVersionProfile());
+        m_xorShader->addUniform(std::unique_ptr<FloatUniform>(m_invSdrWhiteUniform));
+    }
 
     const auto targetDesc = renderTarget.colorDescription();
-    // normalized inverse of the average screen intensity, used by the shader
-    // to keep the perceived contrast of the inversion constant on HDR
-    // outputs (mirrors what KWin's own invert-screen effect does)
-    const float invSdrWhite = targetDesc.transfer == TransferFunction::sRGB
-        ? 1.0f
-        : 1.0f / std::max(1.0f, targetDesc.maxIntensity / targetDesc.minTransfer.getEncodedValue(0.5f));
-    s->setUniform("invSdrWhite", invSdrWhite);
+    // The average (paper-white) intensity of the inversion, in the render
+    // target's transfer space. For SDR/sRGB output this is simply 1.0; for
+    // HDR targets we scale it down so the inverted cursor keeps a constant
+    // perceived contrast instead of blindingly inverting towards peak white
+    // (mirrors what KWin's own invert-screen effect does).
+    float invSdrWhite = 1.0f;
+    if (targetDesc.transfer != TransferFunction::sRGB && targetDesc.maxIntensity > 1.0f) {
+        invSdrWhite = 80.0f / targetDesc.maxIntensity;
+    }
+    m_invSdrWhiteUniform->set(invSdrWhite);
+
+    // pushShader() caches compiled GL programs by shader contents, so reusing
+    // the same Shader object across frames only costs a hash lookup
+    auto s = ShaderManager::instance()->pushShader(m_xorShader.get());
+    // the mask texture may have been recreated (cursor shape change) since the
+    // shader was built - point the sampler at the current texture before drawing
+    m_screenUniform->rebind(m_xorMaskTexture.get(), m_xorMaskTexture->size());
 
     QMatrix4x4 mvp = viewport.projectionMatrix();
     mvp.translate(p.x() * scale, p.y() * scale);
