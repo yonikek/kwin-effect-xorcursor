@@ -196,15 +196,18 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     // The average (paper-white) intensity of the inversion, in the render
     // target's transfer space. For SDR/sRGB output this is simply 1.0; for
     // HDR targets we scale it down so the inverted cursor keeps a constant
-    // perceived contrast instead of blindingly inverting towards peak white
-    // (mirrors what KWin's own invert effect does).
+    // perceived contrast instead of blindingly inverting towards peak white.
+    // ColorDescription::referenceLuminance()/minLuminance() are absolute
+    // nits values (SDR reference defaults to 80 nits), while
+    // TransferFunction::maxLuminance is relative-ish encoded value at 1.0,
+    // so we normalize by the target's own min luminance before dividing.
     float invSdrWhite = 1.0f;
     const std::shared_ptr<ColorDescription> &desc = renderTarget.colorDescription();
-    if (desc) {
-        const TransferFunction tf = desc->transferFunction();
-        const double maxLuminance = tf.maxLuminance;
-        if (tf.type != TransferFunction::sRGB && maxLuminance > 1.0) {
-            invSdrWhite = static_cast<float>(80.0 / maxLuminance);
+    if (desc && desc->transferFunction().type != TransferFunction::sRGB) {
+        const double maxLuminance = desc->transferFunction().maxLuminance;
+        const double minLuminance = desc->minLuminance();
+        if (maxLuminance > 1.0 && minLuminance > 0.0) {
+            invSdrWhite = static_cast<float>(desc->referenceLuminance() / minLuminance / maxLuminance);
         }
     }
 
