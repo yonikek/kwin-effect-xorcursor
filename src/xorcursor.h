@@ -35,6 +35,7 @@ private:
     void showCursor();
     void hideCursor();
     GLTexture *ensureCursorTexture();
+    void updateXorMaskTexture();
     void markCursorTextureDirty();
 
     /**
@@ -45,6 +46,8 @@ private:
     QRectF cursorRectLogical() const;
 
     std::unique_ptr<GLTexture> m_cursorTexture;
+    /** Cached pure-white premultiplied alpha mask used by the XOR shader. */
+    std::unique_ptr<GLTexture> m_xorMaskTexture;
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
     /** Bounding rect of the last painted cursor shape, in logical coordinates. */

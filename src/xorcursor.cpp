@@ -8,10 +8,62 @@
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
+#include "kwin_enums.h"
+#include "opengl/glshader.h"
+#include "opengl/glshadermanager.h"
 #include "opengl/glutils.h"
+
+#include <QPainter>
+
+#include <algorithm>
+#include <optional>
 
 namespace KWin
 {
+
+/**
+ * Fragment shader which replaces the legacy fixed-function GL_XOR logic op.
+ *
+ * It expects the cursor shape as a pure white premultiplied texture bound to
+ * the default sampler ("color"/"alpha") and the current screen contents in
+ * the "screen" sampler. The blending equation implemented here is
+ *     result = screen * (1 - a) + (color - screen * color)
+ * which for a white cursor (rgb == a) reduces to
+ *     result = mix(screen, inv_srgb(screen), a)
+ * Fully transparent pixels leave the screen untouched, fully opaque pixels
+ * are inverted and partially covered pixels are blended accordingly. Because
+ * the operation is its own inverse, painting the same cursor again restores
+ * the original content - just like XOR did, but without requiring
+ * GL_COLOR_LOGIC_OP (which is deprecated on desktop GL and unavailable in
+ * GLES at all) and while keeping the result correct in linear/HDR spaces.
+ */
+class XorShaderFragment : public ShaderFragment
+{
+public:
+    XorShaderFragment()
+        : ShaderFragment(RenderPass::Final)
+    {
+    }
+    std::optional<Introspection> introspect() const override
+    {
+        Introspection ret;
+        ret.textures.append({QStringLiteral("screen"), false});
+        return ret;
+    }
+    QString source() const override
+    {
+        return u""_s
+            R"(
+            uniform highp vec4 invSdrWhite;
+            void main()
+            {
+                highp vec4 screen = texture(screenSampler, vTexcoord);
+                // per-channel inversion, clamped to [0, 1]
+                highp vec4 inverted = abs(screen - vec4(invSdrWhite));
+                gl_FragColor = color * (1.0 - alpha) + (inverted - screen * inverted);
+            })";
+    }
+};
 
 XorCursorEffect::XorCursorEffect()
 {
@@ -45,14 +97,37 @@ void XorCursorEffect::markCursorTextureDirty()
     m_cursorTextureDirty = true;
 }
 
+void XorCursorEffect::updateXorMaskTexture()
+{
+    // Build a pure white premultiplied mask from the cursor's alpha channel
+    // (RGB = 255 * a, A = a). The XOR fragment shader only needs this alpha
+    // coverage value to compute the inversion; anti-aliased edge pixels blend
+    // linearly between the untouched screen and the inverted screen.
+    const QImage image = effects->cursorImage().image();
+    if (image.isNull()) {
+        m_xorMaskTexture.reset();
+        return;
+    }
+    QImage mask(image.size(), QImage::Format_ARGB32_Premultiplied);
+    mask.fill(qRgba(255, 255, 255, 0));
+    QPainter painter(&mask);
+    painter.setCompositionMode(QPainter::CompositionMode_Source);
+    painter.drawImage(0, 0, image);
+    painter.end();
+    m_xorMaskTexture = GLTexture::upload(mask);
+    if (m_xorMaskTexture) {
+        m_xorMaskTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+    }
+}
+
 void XorCursorEffect::showCursor()
 {
     if (m_isMouseHidden) {
         disconnect(effects, &EffectsHandler::cursorShapeChanged, this, &XorCursorEffect::markCursorTextureDirty);
         disconnect(effects, &EffectsHandler::mouseChanged, this, &XorCursorEffect::slotMouseChanged);
-        // the XOR-composited pixels are still inverted on screen; repaint the
-        // last painted cursor area so that the original content is restored
-        // before KWin starts drawing its own cursor again
+        // the shader-inverted pixels are still on screen; repaint the last
+        // painted cursor area so that the original content is restored before
+        // KWin starts drawing its own cursor again
         if (!m_cursorPaintRect.isEmpty()) {
             const QRect r = m_cursorPaintRect.toAlignedRect();
             effects->addRepaint(r.x(), r.y(), r.width(), r.height());
@@ -60,6 +135,7 @@ void XorCursorEffect::showCursor()
         // show the previously hidden mouse-pointer and free the loaded texture/picture.
         effects->showCursor();
         m_cursorTexture.reset();
+        m_xorMaskTexture.reset();
         m_cursorPaintRect = QRectF();
         m_isMouseHidden = false;
     }
@@ -68,12 +144,16 @@ void XorCursorEffect::showCursor()
 void XorCursorEffect::hideCursor()
 {
     if (!m_isMouseHidden) {
-        // try to load the cursor-theme into a OpenGL texture and if successful then hide the mouse-pointer
+        // try to prepare the cursor image / mask texture and only hide the
+        // hardware cursor if that succeeded
         GLTexture *texture = nullptr;
         if (effects->isOpenGLCompositing()) {
             texture = ensureCursorTexture();
+            if (texture) {
+                updateXorMaskTexture();
+            }
         }
-        if (texture) {
+        if (texture && m_xorMaskTexture) {
             effects->hideCursor();
             connect(effects, &EffectsHandler::cursorShapeChanged, this, &XorCursorEffect::markCursorTextureDirty);
             connect(effects, &EffectsHandler::mouseChanged, this, &XorCursorEffect::slotMouseChanged);
@@ -112,23 +192,45 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
 
     // Only paint if the cursor actually intersects the region being repainted
     // in this pass. Painting outside of the dirty region would leave the
-    // XOR-composited state inconsistent (the previous inversion could not be
+    // inverted state inconsistent (the previous inversion could not be
     // undone), which is exactly what this check prevents.
     const QRectF cursorDeviceRect(p.x() * scale, p.y() * scale, cursorSize.width() * scale, cursorSize.height() * scale);
     if (!deviceRegion.intersects(Rect(cursorDeviceRect.toAlignedRect()))) {
         return;
     }
 
-    glEnable(GL_COLOR_LOGIC_OP);
-    glLogicOp(GL_XOR);
-    auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture | ShaderTrait::TransformColorspace);
-    s->setColorspaceUniforms(ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
+    // Shader-based replacement for the legacy fixed-function GL_XOR logic
+    // op; see XorShaderFragment for the math. The "color" of the drawn quad
+    // comes from the white premultiplied mask texture, the "screen" sampler
+    // holds the current framebuffer contents.
+    if (m_cursorTextureDirty) {
+        updateXorMaskTexture();
+    }
+    if (!m_xorMaskTexture) {
+        return;
+    }
+
+    auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture);
+    s->add(std::make_unique<XorShaderFragment>());
+    s->addUniform(std::make_unique<TextureUniform>(GL_TEXTURE_2D,
+                                                   m_xorMaskTexture.get(),
+                                                   m_xorMaskTexture->size(),
+                                                   QStringLiteral("screen")));
+
+    const auto targetDesc = renderTarget.colorDescription();
+    // normalized inverse of the average screen intensity, used by the shader
+    // to keep the perceived contrast of the inversion constant on HDR
+    // outputs (mirrors what KWin's own invert-screen effect does)
+    const float invSdrWhite = targetDesc.transfer == TransferFunction::sRGB
+        ? 1.0f
+        : 1.0f / std::max(1.0f, targetDesc.maxIntensity / targetDesc.minTransfer.getEncodedValue(0.5f));
+    s->setUniform("invSdrWhite", invSdrWhite);
+
     QMatrix4x4 mvp = viewport.projectionMatrix();
     mvp.translate(p.x() * scale, p.y() * scale);
     s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
     cursorTexture->render(cursorSize * scale);
     ShaderManager::instance()->popShader();
-    glDisable(GL_COLOR_LOGIC_OP);
 }
 
 bool XorCursorEffect::isActive() const
@@ -141,9 +243,9 @@ void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
     if (pos == old) {
         return;
     }
-    // Because the cursor is XOR-composited, both the area where the cursor was
-    // previously painted and the area where it will be painted now have to be
-    // repainted: the old one to restore the original pixels, the new one to
+    // Because the cursor is inverted in-place, both the area where the cursor
+    // was previously painted and the area where it will be painted now have to
+    // be repainted: the old one to restore the original pixels, the new one to
     // invert them. Repainting only these two rectangles instead of the whole
     // screen massively reduces the amount of work per frame.
     auto addLogicRectRepaint = [this](const QRectF &rect) {
