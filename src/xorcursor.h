@@ -6,16 +6,20 @@
 
 #pragma once
 
-#include "core/colorspace.h"
 #include "effect/effect.h"
-#include <KWin/GLShader>
+
+#include <QPoint>
+#include <QPointF>
+#include <QRectF>
+#include <QSize>
+
+#include <memory>
 
 namespace KWin
 {
 
-class GLFramebuffer;
+class GLShader;
 class GLTexture;
-class GLVertexBuffer;
 
 class XorCursorEffect : public Effect
 {
@@ -29,14 +33,19 @@ public:
     bool isActive() const override;
 
 private Q_SLOTS:
-    void slotMouseChanged(const QPointF &pos, const QPointF &old);
+    void slotMouseChanged();
 
 private:
     void showCursor();
     void hideCursor();
-    GLTexture *ensureCursorTexture();
-    void updateXorMaskTexture();
-    void markCursorTextureDirty();
+    /**
+     * Builds (or refreshes) the pure-white premultiplied alpha mask texture of
+     * the current cursor shape and the shader that performs the XOR inversion
+     * against the framebuffer contents. Returns false if the GL resources
+     * could not be created.
+     */
+    bool ensureGlResources();
+    void releaseGlResources();
 
     /**
      * Returns the bounding rectangle (in logical coordinates) of the currently
@@ -45,14 +54,14 @@ private:
      */
     QRectF cursorRectLogical() const;
 
-    std::unique_ptr<GLTexture> m_cursorTexture;
-    /** Cached pure-white premultiplied alpha mask used by the XOR shader. */
-    std::unique_ptr<GLTexture> m_xorMaskTexture;
-    /** Cached shader implementing the XOR inversion (built lazily). */
+    /** Cached pure-white premultiplied alpha mask of the cursor shape. */
+    std::unique_ptr<GLTexture> m_maskTexture;
+    /** Cached shader implementing the XOR inversion. */
     std::unique_ptr<GLShader> m_xorShader;
-    TextureUniform *m_screenUniform = nullptr; // owned by m_xorShader
-    FloatUniform *m_invSdrWhiteUniform = nullptr; // owned by m_xorShader
-    bool m_cursorTextureDirty = false;
+    /** Size (in device pixels) of the mask texture currently uploaded. */
+    QSize m_maskSize;
+    /** Cursor hotspot at the time the mask was last built. */
+    QPoint m_maskHotSpot;
     bool m_isMouseHidden = false;
     /** Bounding rect of the last painted cursor shape, in logical coordinates. */
     QRectF m_cursorPaintRect;
