@@ -178,18 +178,20 @@ QRectF XorCursorEffect::cursorRectLogical() const
     return QRectF(p, size);
 }
 
-void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
+bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
     // snapshot where we last inverted *before* the base pass repaints those
     // pixels back to their original content
     const QRectF oldPaintRect = m_cursorPaintRect;
 
-    effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
+    if (!effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen)) {
+        return false;
+    }
     if (!m_isMouseHidden) {
-        return;
+        return true;
     }
     if (!ensureGlResources()) {
-        return;
+        return true;
     }
 
     const PlatformCursorImage cursor = effects->cursorImage();
@@ -204,14 +206,14 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
                                   sizeLogical.height() * scale);
 
     // The inversion is stateful: it must be applied exactly once over the
-    // current bounding box. Only paint when this output's device region fully
-    // contains that box; partial repaints (e.g. the cursor straddling an
-    // output edge or a partial damage rect) are skipped so that no half
+    // current bounding box. Only paint when this pass' device damage region
+    // actually covers that box; partial repaints (e.g. the cursor straddling
+    // an output edge or a small damage rect) are skipped so that no half
     // inversion can ever be baked into the framebuffer. The cursor simply
     // doesn't show for that frame on that output instead of corrupting pixels.
-    if (!deviceRegion.rect().toQRect().contains(cursorRectDevice.toAlignedRect())) {
+    if (!deviceRegion.intersects(Rect(cursorRectDevice.toAlignedRect()))) {
         m_cursorPaintRect = QRectF();
-        return;
+        return true;
     }
 
     // If the previous inversion area was not restored by the base repaint
@@ -221,9 +223,9 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     if (!oldPaintRect.isEmpty()) {
         const QRectF oldDeviceRect(oldPaintRect.topLeft() * scale,
                                    oldPaintRect.size() * scale);
-        if (!deviceRegion.rect().toQRect().contains(oldDeviceRect.toAlignedRect())) {
+        if (!deviceRegion.intersects(Rect(oldDeviceRect.toAlignedRect()))) {
             m_cursorPaintRect = QRectF();
-            return;
+            return true;
         }
     }
 
@@ -267,8 +269,9 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     // Blending must be disabled: the shader already computes the final pixel
     // value and writes it directly (its alpha passthrough keeps the result
     // opaque). Any residual blend state from the base pass would corrupt the
-    // inversion and break the self-inverse property.
-    const bool blendingWasEnabled = GLFramebuffer::isBlendingEnabled();
+    // inversion and break the self-inverse property. Save/restore the GL
+    // state directly (KWin 6 has no GLFramebuffer::isBlendingEnabled()).
+    const bool blendingWasEnabled = glIsEnabled(GL_BLEND);
     glDisable(GL_BLEND);
 
     m_cursorTexture->render(sizeLogical * scale);
@@ -288,6 +291,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
                                cursorRectDevice.y() / scale,
                                cursorRectDevice.width() / scale,
                                cursorRectDevice.height() / scale);
+    return true;
 }
 
 bool XorCursorEffect::isActive() const
