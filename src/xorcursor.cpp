@@ -178,20 +178,18 @@ QRectF XorCursorEffect::cursorRectLogical() const
     return QRectF(p, size);
 }
 
-bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
+void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
     // snapshot where we last inverted *before* the base pass repaints those
     // pixels back to their original content
     const QRectF oldPaintRect = m_cursorPaintRect;
 
-    if (!effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen)) {
-        return false;
-    }
+    effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
     if (!m_isMouseHidden) {
-        return true;
+        return;
     }
     if (!ensureGlResources()) {
-        return true;
+        return;
     }
 
     const PlatformCursorImage cursor = effects->cursorImage();
@@ -213,7 +211,7 @@ bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     // doesn't show for that frame on that output instead of corrupting pixels.
     if (!deviceRegion.intersects(Rect(cursorRectDevice.toAlignedRect()))) {
         m_cursorPaintRect = QRectF();
-        return true;
+        return;
     }
 
     // If the previous inversion area was not restored by the base repaint
@@ -225,7 +223,7 @@ bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
                                    oldPaintRect.size() * scale);
         if (!deviceRegion.intersects(Rect(oldDeviceRect.toAlignedRect()))) {
             m_cursorPaintRect = QRectF();
-            return true;
+            return;
         }
     }
 
@@ -291,7 +289,6 @@ bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
                                cursorRectDevice.y() / scale,
                                cursorRectDevice.width() / scale,
                                cursorRectDevice.height() / scale);
-    return true;
 }
 
 bool XorCursorEffect::isActive() const
