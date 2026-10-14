@@ -8,10 +8,8 @@
 
 #include "effect/effect.h"
 
-#include <QPoint>
 #include <QPointF>
 #include <QRectF>
-#include <QSize>
 
 #include <memory>
 
@@ -34,15 +32,15 @@ public:
 
 private Q_SLOTS:
     void slotMouseChanged();
+    void markCursorTextureDirty();
 
 private:
     void showCursor();
     void hideCursor();
     /**
-     * Builds (or refreshes) the pure-white premultiplied alpha mask texture of
-     * the current cursor shape and the shader that performs the XOR inversion
-     * against the framebuffer contents. Returns false if the GL resources
-     * could not be created.
+     * Builds (or refreshes) the texture of the current cursor image and the
+     * shader that performs the XOR inversion against the framebuffer
+     * contents. Returns false if the GL resources could not be created.
      */
     bool ensureGlResources();
     void releaseGlResources();
@@ -54,14 +52,12 @@ private:
      */
     QRectF cursorRectLogical() const;
 
-    /** Cached pure-white premultiplied alpha mask of the cursor shape. */
-    std::unique_ptr<GLTexture> m_maskTexture;
+    /** Cached texture of the current cursor image (uploaded on shape change). */
+    std::unique_ptr<GLTexture> m_cursorTexture;
     /** Cached shader implementing the XOR inversion. */
     std::unique_ptr<GLShader> m_xorShader;
-    /** Size (in device pixels) of the mask texture currently uploaded. */
-    QSize m_maskSize;
-    /** Cursor hotspot at the time the mask was last built. */
-    QPoint m_maskHotSpot;
+    /** Set when the cursor shape changed and the texture needs re-uploading. */
+    bool m_cursorTextureDirty = true;
     bool m_isMouseHidden = false;
     /** Bounding rect of the last painted cursor shape, in logical coordinates. */
     QRectF m_cursorPaintRect;
