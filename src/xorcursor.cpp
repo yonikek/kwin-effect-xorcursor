@@ -83,7 +83,7 @@ bool XorCursorEffect::ensureGlResources()
     // cursor shape changed. The XOR shader only needs this coverage value;
     // anti-aliased edge pixels blend linearly between the untouched screen
     // and the inverted screen.
-    if (!m_maskTexture || m_maskSize != cursor.image().size() || m_maskHotSpot != cursor.hotSpot()) {
+    if (!m_maskTexture || m_maskSize != cursor.image().size() || m_maskHotSpot != cursor.hotSpot().toPoint()) {
         QImage mask(cursor.image().size(), QImage::Format_ARGB32_Premultiplied);
         mask.fill(Qt::transparent);
         QPainter painter(&mask);
@@ -97,7 +97,7 @@ bool XorCursorEffect::ensureGlResources()
         newMask->setWrapMode(GL_CLAMP_TO_EDGE);
         m_maskTexture = std::move(newMask);
         m_maskSize = cursor.image().size();
-        m_maskHotSpot = cursor.hotSpot();
+        m_maskHotSpot = cursor.hotSpot().toPoint();
     }
 
     // Build the shader exactly once; ShaderManager caches the compiled GL
@@ -162,7 +162,7 @@ QRectF XorCursorEffect::cursorRectLogical() const
 {
     const PlatformCursorImage cursor = effects->cursorImage();
     const QSizeF size = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-    const QPointF p = effects->cursorPos() - QPointF(cursor.hotSpot()) / cursor.image().devicePixelRatio();
+    const QPointF p = effects->cursorPos() - QPointF(cursor.hotSpot().toPoint()) / cursor.image().devicePixelRatio();
     return QRectF(p, size);
 }
 
