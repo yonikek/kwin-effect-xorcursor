@@ -8,9 +8,8 @@
 #include "core/rendertarget.h"
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
-#include "opengl/glshader.h"
-#include "opengl/glshadermanager.h"
-#include "opengl/glutils.h"
+#include <KWin/GLShader>
+#include <KWin/ShaderManager>
 
 #include <QPainter>
 
@@ -36,11 +35,11 @@ namespace KWin
  * GL_COLOR_LOGIC_OP (which is deprecated on desktop GL and unavailable in
  * GLES at all) and while keeping the result correct in linear/HDR spaces.
  */
-class XorShaderFragment : public ShaderFragment
+class XorShaderFragment : public GLShaderFragment
 {
 public:
     XorShaderFragment()
-        : ShaderFragment(RenderPass::Final)
+        : GLShaderFragment(RenderPass::Final)
     {
     }
     std::optional<Introspection> introspect() const override
@@ -53,11 +52,11 @@ public:
     {
         return u""_s
             R"(
-            uniform highp vec4 invSdrWhite;
+            uniform highp float invSdrWhite;
             void main()
             {
                 highp vec4 screen = texture(screenSampler, vTexcoord);
-                // per-channel inversion, clamped to [0, 1]
+                // per-channel inversion around the target's white point
                 highp vec4 inverted = abs(screen - vec4(invSdrWhite));
                 gl_FragColor = color * (1.0 - alpha) + (inverted - screen * inverted);
             })";
@@ -218,7 +217,7 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     // setup, so build it once and reuse it across frames instead of pushing
     // a freshly-constructed shader (and duplicate uniforms) every paint pass.
     if (!m_xorShader) {
-        m_xorShader = std::make_unique<Shader>();
+        m_xorShader = std::make_unique<GLShader>();
         m_xorShader->add(std::make_unique<XorShaderFragment>());
         // the mask texture is only sampled through this uniform, so it must be
         // part of the shader's uniform set; the concrete texture is swapped in
@@ -239,8 +238,10 @@ void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     // perceived contrast instead of blindingly inverting towards peak white
     // (mirrors what KWin's own invert-screen effect does).
     float invSdrWhite = 1.0f;
-    if (targetDesc.transfer != TransferFunction::sRGB && targetDesc.maxIntensity > 1.0f) {
-        invSdrWhite = 80.0f / targetDesc.maxIntensity;
+    if (const auto transfer = targetDesc.transfer()) {
+        if (transfer.value() != TransferFunction::sRGB && targetDesc.maxIntensity > 1.0f) {
+            invSdrWhite = 80.0f / targetDesc.maxIntensity;
+        }
     }
     m_invSdrWhiteUniform->set(invSdrWhite);
 
