@@ -9,13 +9,12 @@
 #include "core/renderviewport.h"
 #include "effect/effecthandler.h"
 #include "opengl/glshader.h"
+#include "opengl/glshadermanager.h"
 #include "opengl/gltexture.h"
-#include "opengl/shadermanager.h"
 
 #include <epoxy/gl.h>
 
 #include <QPainter>
-#include <logging.h>
 
 namespace KWin
 {
@@ -37,10 +36,13 @@ namespace KWin
  * painting the same rectangle again restores the original content - just like
  * XOR did, but without requiring GL_COLOR_LOGIC_OP (deprecated on desktop GL
  * and unavailable on GLES altogether).
+ *
+ * Note: generateCustomShader() prepends "#define TRAIT_*" lines before our
+ * source, so the fragment shader must not carry its own #version directive
+ * (it would no longer be the first line then). The base vertex/fragment
+ * shaders that KWin generates for us use GLSL 1.40, so we target the same.
  */
 static const QByteArray s_xorFragmentSource = QByteArrayLiteral(R"(
-#version 140
-
 uniform sampler2D sampler;
 uniform sampler2D screenSampler;
 uniform float invSdrWhite;
@@ -103,7 +105,9 @@ bool XorCursorEffect::ensureGlResources()
     if (!m_xorShader) {
         m_xorShader = ShaderManager::instance()->generateCustomShader(ShaderTrait::MapTexture, QByteArray(), s_xorFragmentSource);
         if (!m_xorShader) {
-            qCWarning(KWIN_CORE, "xorcursor: failed to compile the XOR cursor shader");
+            // the custom fragment shader could not be compiled; keep the
+            // hardware cursor visible rather than hiding it without a
+            // replacement
             return false;
         }
     }
