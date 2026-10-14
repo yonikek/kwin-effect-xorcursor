@@ -9,7 +9,7 @@
 namespace KWin
 {
 
-KWIN_EFFECT_FACTORY(XorCursorEffect, "metadata.json")
+KWIN_EFFECT_FACTORY(KWin::InvertCursorEffect, "metadata.json")
 
 } // namespace KWin
 
