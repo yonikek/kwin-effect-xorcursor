@@ -127,40 +127,41 @@ void XorCursorEffect::addRepaintForRegion(const Region &region)
 
 bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
-    if (!effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen)) {
-        return false;
-    }
+    // Nothing to do if we are not compositing the cursor ourselves — just
+    // forward the call and propagate its result (it is [[nodiscard]]).
     if (!m_isMouseHidden) {
-        return true;
+        return effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
     }
+
+    // Decide *before* compositing whether the cursor sprite intersects this
+    // output's damage. If it doesn't, no pixel's XOR state changes in this
+    // frame, so we can skip all GL state setup entirely.
     GLTexture *cursorTexture = ensureCursorTexture();
-    if (!cursorTexture) {
-        return true;
-    }
-
-    const auto cursor = effects->cursorImage();
-    const QSize textureSize = cursorTexture->size();
-    const QPointF p = effects->cursorPos();
-    const QRectF spriteRect = cursorRectAt(p, textureSize);
-    const auto scale = viewport.scale();
-
-    // Map the global scene rect of the sprite into this output's framebuffer
-    // (device pixel) coordinates. If it doesn't overlap the damage for this
-    // frame there is nothing to do — skip all GL state changes entirely.
+    QRect deviceBounds;
+    QRectF localSprite;
     const QPointF origin = screen->globalGeometry().topLeft();
-    const QRectF localSprite(spriteRect.topLeft() - origin, spriteRect.size());
-    const QRectF deviceSprite(QPointF(localSprite.x() * scale, localSprite.y() * scale),
-                              QSizeF(localSprite.width() * scale, localSprite.height() * scale));
-    const QRect deviceBounds = deviceSprite.toAlignedRect();
-    if (deviceBounds.isNull() || !deviceRegion.intersects(deviceBounds)) {
-        return true;
+    if (cursorTexture) {
+        const QSize textureSize = cursorTexture->size();
+        const QRectF spriteRect = cursorRectAt(effects->cursorPos(), textureSize);
+        localSprite = QRectF(spriteRect.topLeft() - origin, spriteRect.size());
+        const auto scale = viewport.scale();
+        deviceBounds = QRectF(QPointF(localSprite.x() * scale, localSprite.y() * scale),
+                              QSizeF(localSprite.width() * scale, localSprite.height() * scale))
+                           .toAlignedRect();
+    }
+    const bool overlapsDamage = !deviceBounds.isNull() && deviceRegion.intersects(deviceBounds);
+
+    const bool painted = effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
+    if (!painted || !overlapsDamage || !cursorTexture) {
+        return painted;
     }
 
     // Track the exact footprint of inverted pixels currently on screen so the
     // next mouse move can restore precisely those pixels. The region book-
     // keeping happens in global scene coordinates.
-    const Region paintedRegion(spriteRect.toAlignedRect());
-    m_paintedRect = spriteRect.toAlignedRect();
+    const QRect spriteRect = localSprite.translated(origin).toAlignedRect();
+    const Region paintedRegion(spriteRect);
+    m_paintedRect = spriteRect;
     m_pendingRegion -= paintedRegion;
 
     GLboolean blendEnabled = glIsEnabled(GL_BLEND);
@@ -185,12 +186,17 @@ bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
               clip.boundingRect().width(), clip.boundingRect().height());
     glEnable(GL_SCISSOR_TEST);
 
-    auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture);
+    ShaderManager *shaderManager = ShaderManager::instance();
+    // pushShader()/popShader() manage the shader's lifetime internally: they
+    // return a raw GLShader* and popShader() may delete it. Assigning the
+    // result to std::shared_ptr (as in older code) is ill-formed, so keep it
+    // as a pointer and always pair with popShader().
+    GLShader *s = shaderManager->pushShader(ShaderTrait::MapTexture);
     QMatrix4x4 mvp = viewport.projectionMatrix();
-    mvp.translate((spriteRect.x() - origin.x()) * scale, (spriteRect.y() - origin.y()) * scale);
+    mvp.translate(localSprite.x(), localSprite.y());
     s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
-    cursorTexture->render(QSizeF(deviceBounds.size()));
-    ShaderManager::instance()->popShader();
+    cursorTexture->render(viewport, QSizeF(localSprite.size()));
+    shaderManager->popShader();
 
     glDisable(GL_SCISSOR_TEST);
     glBlendFuncSeparate(blendSrcRgb, blendDstRgb, blendSrcAlpha, blendDstAlpha);
