@@ -36,9 +36,10 @@ private:
     void hideCursor();
     GLTexture *ensureCursorTexture();
     void markCursorTextureDirty();
-    // Global-scene-coordinate rect occupied by the cursor sprite when its
-    // hotspot is at |hotspotPos| and the texture has |textureSize| device px.
-    QRectF cursorRectAt(const QPointF &hotspotPos, const QSize &textureSize) const;
+    // Global-scene-coordinate bounding box occupied by the cursor sprite when
+    // its hotspot is at |hotspotPos|. Rounded outwards so it always fully
+    // covers the drawn quad.
+    QRect spriteBoundingRectAt(const QPointF &hotspotPos) const;
     // Requests a repaint of exactly |region| (global scene coords) on every
     // output it intersects. Used instead of full-screen repaints so that only
     // the pixels whose inverted XOR state actually changes get recomposited.
