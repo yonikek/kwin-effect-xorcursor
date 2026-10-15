@@ -10,7 +10,11 @@
 #include "effect/effecthandler.h"
 #include "opengl/glutils.h"
 
+#include <KWindowSystem/KX11Extras>
+
 #include <cmath>
+
+Q_DECLARE_METATYPE(KWin::Region) // the Region type in this KWin does not carry Q_DECLARE_METATYPE
 
 namespace KWin
 {
@@ -51,7 +55,7 @@ void XorCursorEffect::markCursorTextureDirty()
     // whole painted footprint has to be refreshed: the next frame will restore
     // it and draw the new shape at the current pointer position.
     if (m_isMouseHidden && !m_paintedRect.isNull()) {
-        const Region footprint(m_paintedRect);
+        const Region footprint(QRegion(m_paintedRect));
         m_pendingRegion += footprint;
         addRepaintForRegion(footprint);
     }
@@ -101,12 +105,15 @@ void XorCursorEffect::hideCursor()
     }
 }
 
-QRectF XorCursorEffect::cursorRectAt(const QPointF &hotspotPos, const QSize &textureSize) const
+QRect XorCursorEffect::spriteBoundingRectAt(const QPointF &hotspotPos) const
 {
+    // Device-pixel-aligned bounding box (global scene coordinates) of the
+    // cursor sprite when its hotspot is at |hotspotPos|. Rounded outwards so
+    // the rectangle always fully covers the drawn quad.
     const auto cursor = effects->cursorImage();
-    const qreal dpr = std::max(1.0, double(cursor.image().devicePixelRatio()));
-    const QSizeF logicalSize(double(textureSize.width()) / dpr, double(textureSize.height()) / dpr);
-    return QRectF(hotspotPos - cursor.hotSpot(), logicalSize);
+    const QSizeF logicalSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
+    const QPointF topLeft = hotspotPos - cursor.hotSpot();
+    return QRectF(topLeft, logicalSize).toAlignedRect();
 }
 
 void XorCursorEffect::addRepaintForRegion(const Region &region)
@@ -114,55 +121,59 @@ void XorCursorEffect::addRepaintForRegion(const Region &region)
     if (region.isEmpty()) {
         return;
     }
-    // Translate the global-scene-coordinate region onto each output it
-    // touches and dirty only those pixels. Outputs that don't intersect the
-    // region are not woken up at all.
-    for (LogicalOutput *output : workspace()->logicalOutputs()) {
-        const Region local = region.translated(-output->globalGeometry().topLeft());
-        if (local.intersects(QRect(QPoint(0, 0), output->logicalSize()))) {
-            output->addRepaint(local);
-        }
+    // Dirty exactly the affected pixels. In the X11 backend these calls travel
+    // through the _KWIN_DIRECT_PAINT mechanism straight into the per-output
+    // damage bookkeeping, waking up only the outputs that actually contain
+    // damaged pixels (a region spanning several screens marks each of them
+    // separately, already translated into their local coordinates). On Wayland
+    // sessions without KX11Extras there is no public per-region repaint API,
+    // so fall back to a full repaint to keep the cursor artifact-free.
+    if (KX11Extras *x11 = KX11Extras::instance()) {
+        x11->addRepaint(region);
+    } else {
+        effects->addRepaintFull();
     }
 }
 
 bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
-    // Nothing to do if we are not compositing the cursor ourselves — just
-    // forward the call and propagate its result (it is [[nodiscard]]).
-    if (!m_isMouseHidden) {
-        return effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
+    // Fold any queued cursor damage into this output's dirty region *before*
+    // compositing, so KWin recomposes precisely the pixels whose inverted XOR
+    // state must change — instead of the whole screen as before.
+    Region outputDamage = deviceRegion;
+    if (m_isMouseHidden && !m_pendingRegion.isEmpty()) {
+        outputDamage += m_pendingRegion.translated(-screen->geometry().topLeft());
     }
 
     // Decide *before* compositing whether the cursor sprite intersects this
     // output's damage. If it doesn't, no pixel's XOR state changes in this
-    // frame, so we can skip all GL state setup entirely.
-    GLTexture *cursorTexture = ensureCursorTexture();
-    QRect deviceBounds;
+    // frame, so we can skip all GL work entirely.
+    GLTexture *cursorTexture = m_isMouseHidden ? ensureCursorTexture() : nullptr;
+    bool overlapsDamage = false;
     QRectF localSprite;
-    const QPointF origin = screen->globalGeometry().topLeft();
+    const qreal scale = viewport.scale();
     if (cursorTexture) {
-        const QSize textureSize = cursorTexture->size();
-        const QRectF spriteRect = cursorRectAt(effects->cursorPos(), textureSize);
-        localSprite = QRectF(spriteRect.topLeft() - origin, spriteRect.size());
-        const auto scale = viewport.scale();
-        deviceBounds = QRectF(QPointF(localSprite.x() * scale, localSprite.y() * scale),
-                              QSizeF(localSprite.width() * scale, localSprite.height() * scale))
-                           .toAlignedRect();
+        const QRect spriteRect = spriteBoundingRectAt(effects->cursorPos());
+        localSprite = QRectF(QPointF((spriteRect.x() - screen->geometry().x()) * scale,
+                                     (spriteRect.y() - screen->geometry().y()) * scale),
+                             QSizeF(spriteRect.width() * scale, spriteRect.height() * scale));
+        overlapsDamage = outputDamage.intersects(localSprite.toAlignedRect());
     }
-    const bool overlapsDamage = !deviceBounds.isNull() && deviceRegion.intersects(deviceBounds);
 
-    const bool painted = effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
-    if (!painted || !overlapsDamage || !cursorTexture) {
-        return painted;
+    if (!effects->paintScreen(renderTarget, viewport, mask, outputDamage, screen)) {
+        return false;
+    }
+    if (!m_isMouseHidden || !cursorTexture || !overlapsDamage) {
+        return true;
     }
 
     // Track the exact footprint of inverted pixels currently on screen so the
-    // next mouse move can restore precisely those pixels. The region book-
-    // keeping happens in global scene coordinates.
-    const QRect spriteRect = localSprite.translated(origin).toAlignedRect();
-    const Region paintedRegion(spriteRect);
+    // next mouse move can restore precisely those pixels. Bookkeeping happens
+    // in global scene coordinates; the render position below stays in the
+    // output-local, scaled coordinates used by the original effect.
+    const QRect spriteRect = spriteBoundingRectAt(effects->cursorPos());
     m_paintedRect = spriteRect;
-    m_pendingRegion -= paintedRegion;
+    m_pendingRegion -= Region(QRegion(spriteRect));
 
     GLboolean blendEnabled = glIsEnabled(GL_BLEND);
     GLint blendSrcRgb = GL_ONE;
@@ -177,36 +188,25 @@ bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const Render
     glEnable(GL_BLEND);
     glBlendFuncSeparate(GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
 
-    // Restrict rasterization to the damage that actually intersects the
-    // cursor sprite. This both saves fill-rate and guarantees we never
-    // re-XOR pixels outside the tracked dirty regions (which would visibly
-    // toggle them back to their un-inverted state).
-    QRegion clip = deviceRegion.intersected(QRegion(deviceBounds));
-    glScissor(clip.boundingRect().x(), clip.boundingRect().y(),
-              clip.boundingRect().width(), clip.boundingRect().height());
-    glEnable(GL_SCISSOR_TEST);
-
     ShaderManager *shaderManager = ShaderManager::instance();
     // pushShader()/popShader() manage the shader's lifetime internally: they
-    // return a raw GLShader* and popShader() may delete it. Assigning the
-    // result to std::shared_ptr (as in older code) is ill-formed, so keep it
-    // as a pointer and always pair with popShader().
+    // return a raw GLShader* and popShader() may delete it, so keep it as a
+    // plain pointer and always pair the call with popShader().
     GLShader *s = shaderManager->pushShader(ShaderTrait::MapTexture);
     QMatrix4x4 mvp = viewport.projectionMatrix();
     mvp.translate(localSprite.x(), localSprite.y());
     s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
-    cursorTexture->render(viewport, QSizeF(localSprite.size()));
+    cursorTexture->render(QSizeF(localSprite.width(), localSprite.height()));
     shaderManager->popShader();
 
-    glDisable(GL_SCISSOR_TEST);
     glBlendFuncSeparate(blendSrcRgb, blendDstRgb, blendSrcAlpha, blendDstAlpha);
     if (!blendEnabled) {
         glDisable(GL_BLEND);
     }
 
     // If part of our tracked dirty set lies outside this output or wasn't
-    // covered (e.g. clipped away), keep requesting repaints until everything
-    // has been refreshed.
+    // covered by this frame, keep requesting repaints until everything has
+    // been refreshed.
     if (!m_pendingRegion.isEmpty()) {
         addRepaintForRegion(m_pendingRegion);
     }
@@ -225,28 +225,23 @@ void XorCursorEffect::slotMouseChanged(const QPointF &pos, const QPointF &old)
         return;
     }
 
-    const QSize textureSize = m_cursorTexture ? m_cursorTexture->size()
-                                              : effects->cursorImage().image().size();
-    const QRect newRect = cursorRectAt(pos, textureSize).toAlignedRect();
+    const QRect newRect = spriteBoundingRectAt(pos);
 
     // Pixels whose visual state changes are exactly the symmetric difference
     // of the old and the new sprite footprint: the area being vacated must be
     // restored (un-XOR'd) and the newly entered area must be inverted. The
     // overlapping interior keeps its inverted state and must NOT be touched —
     // repainting it would toggle it back and make the cursor disappear.
-    const QRect oldRect = m_paintedRect.isNull()
-        ? cursorRectAt(old, textureSize).toAlignedRect()
-        : m_paintedRect;
-
     Region dirty;
     if (m_paintedRect.isNull()) {
         // Nothing has been painted yet (first paint / re-activation): only the
         // new footprint needs to be refreshed, restoring happens implicitly.
-        dirty += newRect;
+        dirty += Region(QRegion(newRect));
     } else {
-        dirty += oldRect;
-        dirty += newRect;
-        dirty -= oldRect.intersected(newRect);
+        const QRect oldRect = m_paintedRect;
+        const QRect intersection = oldRect.intersected(newRect);
+        dirty += Region(QRegion(oldRect.subtracted(intersection)));
+        dirty += Region(QRegion(newRect.subtracted(intersection)));
     }
 
     // Anything still pending from earlier moves/shape changes in this frame
