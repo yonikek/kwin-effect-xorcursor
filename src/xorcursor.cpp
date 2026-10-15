@@ -30,7 +30,8 @@ GLTexture *XorCursorEffect::ensureCursorTexture()
         m_cursorTextureDirty = false;
         const auto cursor = effects->cursorImage();
         if (!cursor.image().isNull()) {
-            m_cursorTexture = GLTexture::upload(cursor.image());
+            QImage img = cursor.image().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+            m_cursorTexture = GLTexture::upload(img);
             if (!m_cursorTexture) {
                 return nullptr;
             }
@@ -73,36 +74,50 @@ void XorCursorEffect::hideCursor()
     }
 }
 
-void XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
+bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen)
 {
-    effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen);
+    if (!effects->paintScreen(renderTarget, viewport, mask, deviceRegion, screen)) {
+        return false;
+    }
     if (!m_isMouseHidden) {
-        return;
+        return true;
     }
     GLTexture *cursorTexture = ensureCursorTexture();
     if (!cursorTexture) {
-        return;
+        return true;
     }
 
     const auto cursor = effects->cursorImage();
-	QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
-	const QPointF p = effects->cursorPos() - cursor.hotSpot();
-	const auto scale = viewport.scale();
+    QSizeF cursorSize = QSizeF(cursor.image().size()) / cursor.image().devicePixelRatio();
+    const QPointF p = effects->cursorPos() - cursor.hotSpot();
+    const auto scale = viewport.scale();
 
-	// FIX: Scale logical coordinates to device coordinates for the deviceRegion
-	QRectF cursorDeviceRect(p.x() * scale, p.y() * scale, cursorSize.width() * scale, cursorSize.height() * scale);
-	Region cursorRegion = Region(Rect(cursorDeviceRect.toAlignedRect()));
-    effects->paintScreen(renderTarget, viewport, mask, cursorRegion, screen);
-	glEnable(GL_COLOR_LOGIC_OP);
-    glLogicOp(GL_XOR);
-    auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture | ShaderTrait::TransformColorspace);
-    s->setColorspaceUniforms(ColorDescription::sRGB, renderTarget.colorDescription(), RenderingIntent::Perceptual);
+    GLboolean blendEnabled = glIsEnabled(GL_BLEND);
+    GLint blendSrcRgb = GL_ONE;
+    GLint blendDstRgb = GL_ZERO;
+    GLint blendSrcAlpha = GL_ONE;
+    GLint blendDstAlpha = GL_ZERO;
+    glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRgb);
+    glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRgb);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
+
+    glEnable(GL_BLEND);
+    glBlendFuncSeparate(GL_ONE_MINUS_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+
+    auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture);
     QMatrix4x4 mvp = viewport.projectionMatrix();
     mvp.translate(p.x() * scale, p.y() * scale);
     s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
     cursorTexture->render(cursorSize * scale);
     ShaderManager::instance()->popShader();
-	glDisable(GL_COLOR_LOGIC_OP);
+
+    glBlendFuncSeparate(blendSrcRgb, blendDstRgb, blendSrcAlpha, blendDstAlpha);
+    if (!blendEnabled) {
+        glDisable(GL_BLEND);
+    }
+
+    return true;
 }
 
 bool XorCursorEffect::isActive() const
