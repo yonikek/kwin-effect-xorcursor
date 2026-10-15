@@ -48,15 +48,16 @@ private:
     std::unique_ptr<GLTexture> m_cursorTexture;
     bool m_cursorTextureDirty = false;
     bool m_isMouseHidden = false;
-    // Footprint (global scene coords) of the cursor pixels that are currently
-    // XOR-inverted on screen — i.e. the sprite drawn during the last composited
-    // frame. Null when nothing has been painted yet. Tracked so the next mouse
-    // move can restore exactly those pixels.
+    // Footprint (global scene coords) of the sprite drawn during the last
+    // composited frame — used to compute the symmetric difference on mouse
+    // moves so only pixels whose visual state actually changes get repainted.
     QRect m_paintedRect;
-    // Accumulated set of regions that still must be refreshed before the next
-    // frame is composited. Handles multiple mouse moves / shape changes per
-    // frame correctly, and regions that span several outputs.
-    Region m_pendingRegion;
+    // Exact set of pixels (global scene coords) that are currently XOR-inverted
+    // on screen. Tracked per frame so damage caused by other windows, cursor
+    // shape changes or multi-output repaints never leaves ghost images: any
+    // inverted pixel that gets recomposed is re-inverted, and anything still
+    // pending keeps requesting repaints until it has been refreshed.
+    Region m_state;
 };
 
 } // namespace KWin
