@@ -30,23 +30,21 @@ namespace KWin
 
     private:
         bool paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport);
-        void rebuildMask(const QImage &image, qreal factor);
-        void drawMask(const RenderTarget &renderTarget, const RenderViewport &viewport,
-                      GLTexture *texture, const QRegion &mask, const QPointF &pos);
+        void rebuildCursor(const QImage &image, qreal factor);
+        void drawRects(const RenderTarget &renderTarget, const RenderViewport &viewport,
+                       GLTexture *texture, const QRegion &mask, const QPointF &pos);
 
         std::unique_ptr<GLTexture> m_whiteTexture;
         std::unique_ptr<GLTexture> m_blackTexture;
+        // The cursor with its fully opaque pixels removed (shadows, anti-aliased edges, ...)
+        std::unique_ptr<GLTexture> m_translucentTexture;
 
-        // Opaque cursor pixels that are light (these invert the background) and
-        // dark (these are drawn black), in image pixels
-        QRegion m_lightPixels;
-        QRegion m_darkPixels;
-        // The same regions scaled to device pixels of the current output
-        QRegion m_lightScaled;
-        QRegion m_darkScaled;
-        qint64 m_maskCacheKey = 0;
-        qreal m_maskFactor = 0;
-        QPointF m_hotSpot;
+        // Fully opaque (alpha == 255) pixels of the cursor image, in image pixels
+        QRegion m_opaquePixels;
+        // The same region scaled to device pixels of the current output
+        QRegion m_opaqueScaled;
+        qint64 m_cacheKey = 0;
+        qreal m_factor = 0;
     };
 
 } // namespace KWin
