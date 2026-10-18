@@ -116,42 +116,66 @@ namespace KWin
         }
 
         if (key != m_maskCacheKey) {
-            // Rebuild the opaque-pixel region (hard mask, alpha >= 50%).
+            // Split the opaque pixels (alpha >= 50%) by brightness: light pixels
+            // invert the background, dark pixels stay black. This mirrors what
+            // S*(1-D) + D*(1-a) did for black and white cursors.
             const QImage image = source.convertToFormat(QImage::Format_ARGB32);
-            m_maskPixels = QRegion();
+            m_lightPixels = QRegion();
+            m_darkPixels = QRegion();
             for (int y = 0; y < image.height(); ++y) {
                 const QRgb *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
-                int runStart = -1;
-                for (int x = 0; x <= image.width(); ++x) {
-                    const bool opaque = x < image.width() && qAlpha(line[x]) >= 128;
-                    if (opaque && runStart < 0) {
+                // 0 = no run, 1 = light run, 2 = dark run
+                int runType = 0;
+                int runStart = 0;
+                auto flush = [&](int endX) {
+                    if (runType == 1) {
+                        m_lightPixels += QRect(runStart, y, endX - runStart, 1);
+                    } else if (runType == 2) {
+                        m_darkPixels += QRect(runStart, y, endX - runStart, 1);
+                    }
+                };
+                for (int x = 0; x < image.width(); ++x) {
+                    int type = 0;
+                    if (qAlpha(line[x]) >= 128) {
+                        type = qGray(line[x]) >= 128 ? 1 : 2;
+                    }
+                    if (type != runType) {
+                        flush(x);
+                        runType = type;
                         runStart = x;
-                    } else if (!opaque && runStart >= 0) {
-                        m_maskPixels += QRect(runStart, y, x - runStart, 1);
-                        runStart = -1;
                     }
                 }
+                flush(image.width());
             }
         }
 
         // Scale to device pixels. QRegion normalises its rects so they never overlap,
         // which matters because subtract blending would otherwise apply twice.
-        m_maskScaled = QRegion();
-        for (const QRect &r : m_maskPixels) {
-            m_maskScaled += QRectF(r.x() * factor, r.y() * factor,
-                                   r.width() * factor, r.height() * factor)
-            .toAlignedRect();
-        }
+        auto scaleRegion = [factor](const QRegion &in) {
+            QRegion out;
+            for (const QRect &r : in) {
+                out += QRectF(r.x() * factor, r.y() * factor,
+                              r.width() * factor, r.height() * factor)
+                .toAlignedRect();
+            }
+            return out;
+        };
+        m_lightScaled = scaleRegion(m_lightPixels);
+        m_darkScaled = scaleRegion(m_darkPixels);
+        // Adjacent light/dark rects can overlap after rounding; light wins so the
+        // inversion never gets painted over by black.
+        m_darkScaled -= m_lightScaled;
 
-        m_maskTargetSize = QSizeF(source.width() * factor, source.height() * factor);
         m_maskCacheKey = key;
         m_maskFactor = factor;
     }
 
     void XorCursorEffect::drawMask(const RenderTarget &renderTarget, const RenderViewport &viewport,
-                                   GLTexture *texture, const QPointF &pos, const QSizeF &size)
+                                   GLTexture *texture, const QRegion &mask, const QPointF &pos)
     {
-        Q_UNUSED(size)
+        if (mask.isEmpty()) {
+            return;
+        }
 
         auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture
         | ShaderTrait::TransformColorspace);
@@ -161,11 +185,11 @@ namespace KWin
                                  renderTarget.colorDescription(),
                                  RenderingIntent::Perceptual);
 
-        // Draw one solid rectangle per run of opaque cursor pixels. The texture is a
+        // Draw one solid rectangle per run of cursor pixels. The texture is a
         // single solid texel, so texture coordinates don't matter. This avoids the
         // Region-based GLTexture::render() overloads, whose API changes between releases.
         const qreal scale = viewport.scale();
-        for (const QRect &r : m_maskScaled) {
+        for (const QRect &r : mask) {
             QMatrix4x4 mvp = viewport.projectionMatrix();
             mvp.translate(pos.x() * scale + r.x(), pos.y() * scale + r.y());
             s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
@@ -193,29 +217,33 @@ namespace KWin
         const qreal factor = scale / dpr;
 
         rebuildMask(image, factor);
-        if (m_maskScaled.isEmpty()) {
+        if (m_lightScaled.isEmpty() && m_darkScaled.isEmpty()) {
             return false;
         }
 
         // Position of the cursor image relative to the viewport, in logical coordinates.
         const QPointF pos = effects->cursorPos() - cursor.hotSpot()
         - viewport.renderRect().topLeft();
-        const QSizeF cursorSize = QSizeF(image.size()) / dpr;
 
         BlendStateGuard guard;
         glEnable(GL_BLEND);
 
-        // Pass 1: result = S - D, where S is white (W) inside the cursor mask.
+        // Pass 1: dark cursor pixels are painted opaque black (replace the destination).
+        glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+        glBlendFuncSeparate(GL_ONE, GL_ZERO, GL_ZERO, GL_ONE);
+        drawMask(renderTarget, viewport, m_blackTexture.get(), m_darkScaled, pos);
+
+        // Pass 2: light cursor pixels give result = S - D, where S is white (W).
         // Destination alpha is left untouched.
         glBlendEquationSeparate(GL_FUNC_SUBTRACT, GL_FUNC_ADD);
         glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
-        drawMask(renderTarget, viewport, m_whiteTexture.get(), pos, cursorSize);
+        drawMask(renderTarget, viewport, m_whiteTexture.get(), m_lightScaled, pos);
 
-        // Pass 2: pixels brighter than W went negative in pass 1 on float targets.
+        // Pass 3: pixels brighter than W went negative in pass 2 on float targets.
         // MAX with black clamps them to 0. MIN/MAX ignore the blend factors.
         glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
         glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
-        drawMask(renderTarget, viewport, m_blackTexture.get(), pos, cursorSize);
+        drawMask(renderTarget, viewport, m_blackTexture.get(), m_lightScaled, pos);
 
         return true;
     }
