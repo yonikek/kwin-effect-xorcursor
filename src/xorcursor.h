@@ -1,56 +1,50 @@
-/* SPDX-FileCopyrightText: 2025 Jin Liu
- * SPDX-License-Ide*ntifier: GPL-2.0-or-later */
 #pragma once
 
-#include "core/colorspace.h"
-//#include "core/rect.h"
-#include "effect/effect.h"
+#include <effect/effect.h>
 
-#include <QPointer>
-#include <QRect>
+#include <QImage>
+#include <QRegion>
 
 #include <memory>
 
-namespace KWin {
+namespace KWin
+{
 
     class GLTexture;
 
     class XorCursorEffect : public Effect
     {
         Q_OBJECT
+
     public:
         XorCursorEffect();
         ~XorCursorEffect() override;
 
-        bool paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport,
-                         int mask, const Region &deviceRegion, LogicalOutput *screen) override;
-                         bool isActive() const override;
+        static bool supported();
 
-    private Q_SLOTS:
-        void slotMouseChanged(const QPointF &pos, const QPointF &old);
+        bool isActive() const override;
+        int requestedEffectChainPosition() const override;
+
+        [[nodiscard]] bool paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport,
+                                       int mask, const Region &deviceRegion, LogicalOutput *screen) override;
 
     private:
-        void showCursor();
-        void hideCursor();
-        void refreshCursorHidingEffects();
-        bool anotherEffectHidesCursor() const;
-        GLTexture *ensureCursorTexture();
-        void markCursorTextureDirty();
+        bool paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport);
+        void rebuildMask(const QImage &image, qreal factor);
+        void drawMask(const RenderTarget &renderTarget, const RenderViewport &viewport,
+                      GLTexture *texture, const QPointF &pos, const QSizeF &size);
 
-        std::unique_ptr<GLTexture> m_cursorTexture;
-        bool m_cursorTextureDirty = false;
-        bool m_isMouseHidden = false;
+        std::unique_ptr<GLTexture> m_whiteTexture;
+        std::unique_ptr<GLTexture> m_blackTexture;
 
-        // Logical bounding box of the cursor as it was last drawn by paintScreen().
-        // slotMouseChanged() damages this footprint so partial repaints erase the
-        // previous cursor and never leave stale inverted pixels behind.
-        QRect m_lastCursorRect;
-
-        // Cached pointers to effects that also call effects->hideCursor() and
-        // draw their own cursor representation. QPointer auto-nulls if the effect
-        // is unloaded, so these are always safe to dereference.
-        QPointer<Effect> m_shakeCursor;
-        QPointer<Effect> m_hideCursor;
+        // Opaque pixels of the current cursor image, in image pixels
+        QRegion m_maskPixels;
+        // The same region scaled to device pixels of the current output
+        QRegion m_maskScaled;
+        qint64 m_maskCacheKey = 0;
+        qreal m_maskFactor = 0;
+        QSizeF m_maskTargetSize;
+        QPointF m_hotSpot;
     };
 
 } // namespace KWin
