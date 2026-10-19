@@ -13,11 +13,13 @@
 #include <QSizeF>
 
 #include <memory>
+#include <unordered_map>
 
 namespace KWin
 {
 
     class GLTexture;
+    class GLVertexBuffer;
 
     /**
      * Draws the mouse cursor so that its fully opaque pixels invert whatever is
@@ -50,7 +52,7 @@ namespace KWin
         void scheduleRepaint(bool force);
         void hideRealCursor();
         void showRealCursor();
-        const QList<QRect> &scaledRects(const QSize &deviceSize);
+        GLVertexBuffer *maskBuffer(const QSize &deviceSize);
         void ensureRestTexture();
         bool paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport);
 
@@ -66,8 +68,11 @@ namespace KWin
         QPointF m_hotSpot;
         QSizeF m_logicalSize;
         XorCursorDetail::CursorMask m_mask;
-        // Inverted pixels as device-pixel rects, per device size (one entry per output scale)
-        QHash<quint32, QList<QRect>> m_rects;
+        // The inverted pixels as one triangle list per device size (one entry per output
+        // scale), so the whole mask is a single draw call. Created while painting, with
+        // the GL context current; m_buffersDirty defers clearing to the next paint.
+        std::unordered_map<quint32, std::unique_ptr<GLVertexBuffer>> m_buffers;
+        bool m_buffersDirty = false;
         bool m_restDirty = true;
 
         // --- GL resources (created and destroyed with the GL context current) ---

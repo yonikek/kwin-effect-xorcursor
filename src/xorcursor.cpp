@@ -9,6 +9,7 @@
 #include <opengl/glshader.h>
 #include <opengl/gltexture.h>
 #include <opengl/glutils.h>
+#include <opengl/glvertexbuffer.h>
 
 #include <KConfigGroup>
 #include <KSharedConfig>
@@ -252,7 +253,7 @@ namespace KWin
         m_logicalSize = QSizeF(image.size()) / dpr;
 
         m_mask = XorCursorDetail::CursorMask::build(image, m_invertThreshold, m_drawTranslucent);
-        m_rects.clear();
+        m_buffersDirty = true; // cleared while painting, with GL current
         m_restDirty = true; // the texture is (re)created while painting, with GL current
         return true;
     }
@@ -319,14 +320,42 @@ namespace KWin
         return ret;
     }
 
-    const QList<QRect> &XorCursorEffect::scaledRects(const QSize &deviceSize)
+    GLVertexBuffer *XorCursorEffect::maskBuffer(const QSize &deviceSize)
     {
-        const quint32 key = (quint32(deviceSize.width()) << 16) | quint32(deviceSize.height() & 0xffff);
-        const auto it = m_rects.constFind(key);
-        if (it != m_rects.constEnd()) {
-            return *it;
+        if (m_buffersDirty) {
+            m_buffers.clear();
+            m_buffersDirty = false;
         }
-        return *m_rects.insert(key, m_mask.scaled(deviceSize));
+
+        const quint32 key = (quint32(deviceSize.width()) << 16) | quint32(deviceSize.height() & 0xffff);
+        const auto it = m_buffers.find(key);
+        if (it != m_buffers.end()) {
+            return it->second.get();
+        }
+
+        // Two triangles per rect, positions in device pixels relative to the cursor
+        // origin. The textures used with this buffer are a single solid texel, so the
+        // texture coordinate is the same everywhere.
+        const QList<QRect> rects = m_mask.scaled(deviceSize);
+        std::vector<GLVertex2D> vertices;
+        vertices.reserve(size_t(rects.size()) * 6);
+        const QVector2D texcoord(0.5f, 0.5f);
+        for (const QRect &r : rects) {
+            const float x0 = r.left();
+            const float y0 = r.top();
+            const float x1 = r.left() + r.width();
+            const float y1 = r.top() + r.height();
+            vertices.push_back({QVector2D(x0, y0), texcoord});
+            vertices.push_back({QVector2D(x0, y1), texcoord});
+            vertices.push_back({QVector2D(x1, y0), texcoord});
+            vertices.push_back({QVector2D(x1, y0), texcoord});
+            vertices.push_back({QVector2D(x0, y1), texcoord});
+            vertices.push_back({QVector2D(x1, y1), texcoord});
+        }
+
+        auto buffer = std::make_unique<GLVertexBuffer>(GLVertexBuffer::Static);
+        buffer->setVertices(vertices);
+        return m_buffers.emplace(key, std::move(buffer)).first->second.get();
     }
 
     void XorCursorEffect::ensureRestTexture()
@@ -401,35 +430,29 @@ namespace KWin
         const QSizeF size(deviceSize);
 
         if (invert) {
-            const QList<QRect> &rects = scaledRects(deviceSize);
+            GLVertexBuffer *buffer = maskBuffer(deviceSize);
 
-            // One solid rectangle per rect of inverted pixels. The textures are a single
-            // texel, so texture coordinates don't matter. (GLTexture::render(Region, size)
-            // would batch these but does not clip to the region, so it is not used.)
-            auto drawRects = [&](GLTexture *texture) {
-                for (const QRect &r : rects) {
-                    QMatrix4x4 rectMvp = mvp;
-                    rectMvp.translate(r.x(), r.y());
-                    s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, rectMvp);
-                    texture->render(QSizeF(r.size()));
-                }
+            // The whole mask is one draw call per pass. (GLTexture::render(Region, size)
+            // is no help here: it only clips to the region when hardware clipping is on,
+            // by issuing one scissored draw per rect.)
+            auto drawMask = [buffer](GLTexture *texture) {
+                texture->bind();
+                buffer->render(GL_TRIANGLES);
+                texture->unbind();
             };
 
             // Pass 1: result = W - D inside the mask. Destination alpha is untouched.
             glBlendEquationSeparate(GL_FUNC_SUBTRACT, GL_FUNC_ADD);
             glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
-            drawRects(m_whiteTexture.get());
+            drawMask(m_whiteTexture.get());
 
             // Pass 2 (float buffers only): pixels brighter than W went negative. MAX with
             // black clamps them to 0. MIN/MAX ignore the blend factors.
             if (needsClamp) {
                 glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
                 glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
-                drawRects(m_blackTexture.get());
+                drawMask(m_blackTexture.get());
             }
-
-            // Pass 3 draws at the cursor origin again.
-            s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
         }
 
         // Pass 3: the remaining, partly transparent pixels, drawn the way the theme made
