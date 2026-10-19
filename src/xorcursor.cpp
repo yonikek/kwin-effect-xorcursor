@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 #include "xorcursor.h"
 
 #include <core/colorspace.h>
@@ -9,8 +10,12 @@
 #include <opengl/gltexture.h>
 #include <opengl/glutils.h>
 
+#include <KConfigGroup>
+#include <KSharedConfig>
+
 #include <QMatrix4x4>
-#include <QRegion>
+
+#include <algorithm>
 
 namespace KWin
 {
@@ -18,7 +23,7 @@ namespace KWin
     namespace
     {
 
-        // Saves and restores the blend state touched by this effect.
+        // Saves and restores the GL blend state this effect touches.
         class BlendStateGuard
         {
         public:
@@ -54,7 +59,8 @@ namespace KWin
 
         // True when the bound framebuffer stores colours in a fixed-point format. Such a
         // buffer clamps negative blend results to 0 by itself, so the clamp pass is not
-        // needed. Anything unknown (default framebuffer, failed query) returns false.
+        // needed. Anything unknown (default framebuffer, failed query) returns false,
+        // which keeps the clamp pass and is always correct.
         bool boundFramebufferIsFixedPoint()
         {
             GLint fbo = 0;
@@ -68,9 +74,21 @@ namespace KWin
             return type == GL_UNSIGNED_NORMALIZED;
         }
 
-        // Schedules a repaint of a single rect. EffectsHandler::addRepaint() has taken
-        // different rect types over the KWin versions, so use whichever overload exists
-        // and fall back to a full repaint (correct, just slower) if none matches.
+        std::unique_ptr<GLTexture> makeSolidTexture(const QColor &color)
+        {
+            QImage image(1, 1, QImage::Format_RGBA8888_Premultiplied);
+            image.fill(color);
+            auto texture = GLTexture::upload(image);
+            if (texture) {
+                texture->setFilter(GL_NEAREST);
+                texture->setWrapMode(GL_CLAMP_TO_EDGE);
+            }
+            return texture;
+        }
+
+        // Schedules a repaint of one rect. EffectsHandler::addRepaint() has taken different
+        // rect types across KWin versions: use whichever overload exists and fall back to a
+        // full repaint (correct, just slower) when none matches.
         template<typename Handler>
         auto repaintImpl(Handler *handler, const QRect &r, int) -> decltype(handler->addRepaint(Rect(r)), void())
         {
@@ -94,22 +112,11 @@ namespace KWin
             repaintImpl(effects, r, 0);
         }
 
-        std::unique_ptr<GLTexture> makeSolidTexture(const QColor &color)
-        {
-            QImage image(1, 1, QImage::Format_RGBA8888_Premultiplied);
-            image.fill(color);
-            auto texture = GLTexture::upload(image);
-            if (texture) {
-                texture->setFilter(GL_NEAREST);
-                texture->setWrapMode(GL_CLAMP_TO_EDGE);
-            }
-            return texture;
-        }
-
-        // Draw the non-opaque cursor pixels as the theme intended instead of leaving them out.
-        constexpr bool kDrawTranslucentParts = true;
-
     } // namespace
+
+    // ---------------------------------------------------------------------------
+    // Lifecycle and configuration
+    // ---------------------------------------------------------------------------
 
     XorCursorEffect::XorCursorEffect()
     {
@@ -117,61 +124,36 @@ namespace KWin
         m_whiteTexture = makeSolidTexture(Qt::white);
         m_blackTexture = makeSolidTexture(Qt::black);
 
-        effects->hideCursor();
+        reconfigure(ReconfigureAll);
 
-        // Repaint only the area the cursor leaves and the area it enters. Several
-        // events between two frames accumulate, so every intermediate position is
-        // cleaned up. The area under the cursor is additionally recomposed on every
-        // frame in prePaintScreen().
-        connect(effects, &EffectsHandler::mouseChanged, this, [this]() {
-            const QRect r = cursorRect();
-            if (!m_lastRect.isEmpty()) {
-                repaintRect(m_lastRect);
-            }
-            if (!r.isEmpty()) {
-                repaintRect(r);
-            }
-            m_lastRect = r;
-        });
-
-        m_lastRect = cursorRect();
-        if (!m_lastRect.isEmpty()) {
-            repaintRect(m_lastRect);
+        if (!isActive()) {
+            // Without our textures we couldn't draw a cursor, so leave the real one alone.
+            return;
         }
+
+        // Repaint only the areas the cursor leaves and enters. Events between two
+        // frames accumulate, so every intermediate position is cleaned up.
+        connect(effects, &EffectsHandler::mouseChanged, this, [this]() {
+            scheduleRepaint(false);
+        });
+        // String-based so that a missing signal is a runtime warning, not a build error.
+        connect(effects, SIGNAL(cursorShapeChanged()), this, SLOT(slotCursorShapeChanged()));
+
+        refreshCursorImage();
+        hideRealCursor();
+        scheduleRepaint(true);
     }
 
     XorCursorEffect::~XorCursorEffect()
     {
-        effects->showCursor();
+        showRealCursor();
         // Remove our drawing from the screen.
         if (!m_lastRect.isEmpty()) {
             repaintRect(m_lastRect);
         }
-    }
-
-    QRect XorCursorEffect::cursorRect() const
-    {
-        const PlatformCursorImage cursor = effects->cursorImage();
-        const QImage image = cursor.image();
-        if (image.isNull()) {
-            return QRect();
-        }
-        const qreal dpr = image.devicePixelRatio() > 0 ? image.devicePixelRatio() : 1.0;
-        const QRectF rect(effects->cursorPos() - cursor.hotSpot(), QSizeF(image.size()) / dpr);
-        return rect.toAlignedRect().adjusted(-1, -1, 1, 1);
-    }
-
-    void XorCursorEffect::prePaintScreen(ScreenPrePaintData &data)
-    {
-        // The cursor is drawn by inverting what is already in the buffer, which is not
-        // idempotent: if a frame didn't recompose the area under the cursor, the
-        // previous frame's inversion would be inverted back. Including the cursor rect
-        // in every frame's paint region prevents that, however small the frame's damage.
-        const QRect r = cursorRect();
-        if (!r.isEmpty()) {
-            data.paint += Rect(r);
-        }
-        Effect::prePaintScreen(data);
+        // The textures are released by the members' destructors; make sure the GL
+        // context is current when that happens.
+        effects->makeOpenGLContextCurrent();
     }
 
     bool XorCursorEffect::supported()
@@ -190,6 +172,145 @@ namespace KWin
         return 99;
     }
 
+    void XorCursorEffect::reconfigure(ReconfigureFlags)
+    {
+        // Options live in kwinrc under [Effect-xorcursor]:
+        //   InvertThreshold      (1-255, default 255) pixels with alpha >= this invert
+        //   DrawTranslucentParts (bool, default true)  draw the other pixels as themed
+        const auto config = KSharedConfig::openConfig(QStringLiteral("kwinrc"));
+        config->reparseConfiguration();
+        const KConfigGroup group(config, QStringLiteral("Effect-xorcursor"));
+
+        const int threshold = std::clamp(group.readEntry("InvertThreshold", 255), 1, 255);
+        const bool translucent = group.readEntry("DrawTranslucentParts", true);
+
+        const bool changed = !m_configLoaded
+        || threshold != m_invertThreshold
+        || translucent != m_drawTranslucent;
+
+        m_invertThreshold = threshold;
+        m_drawTranslucent = translucent;
+        m_configLoaded = true;
+
+        if (changed) {
+            m_imageKey = 0; // forces the mask to be rebuilt with the new settings
+            m_image = QImage();
+            if (isActive() && m_cursorHidden) {
+                refreshCursorImage();
+                scheduleRepaint(true);
+            }
+        }
+    }
+
+    void XorCursorEffect::hideRealCursor()
+    {
+        // Balanced exactly once, so we never unhide a cursor somebody else hid.
+        if (!m_cursorHidden) {
+            effects->hideCursor();
+            m_cursorHidden = true;
+        }
+    }
+
+    void XorCursorEffect::showRealCursor()
+    {
+        if (m_cursorHidden) {
+            effects->showCursor();
+            m_cursorHidden = false;
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Cursor state and damage
+    // ---------------------------------------------------------------------------
+
+    bool XorCursorEffect::refreshCursorImage()
+    {
+        const PlatformCursorImage cursor = effects->cursorImage();
+        const QImage image = cursor.image();
+        if (image.isNull()) {
+            m_hasCursor = false;
+            return false;
+        }
+
+        const QPointF hotSpot = cursor.hotSpot();
+        if (m_hasCursor && hotSpot == m_hotSpot) {
+            if (image.cacheKey() == m_imageKey) {
+                return true;
+            }
+            // Same pixels in a different QImage object: don't rebuild or re-upload.
+            if (image.size() == m_image.size() && image == m_image) {
+                m_imageKey = image.cacheKey();
+                return true;
+            }
+        }
+
+        m_hasCursor = true;
+        m_image = image;
+        m_imageKey = image.cacheKey();
+        m_hotSpot = hotSpot;
+        const qreal dpr = image.devicePixelRatio() > 0 ? image.devicePixelRatio() : 1.0;
+        m_logicalSize = QSizeF(image.size()) / dpr;
+
+        m_mask = XorCursorDetail::CursorMask::build(image, m_invertThreshold, m_drawTranslucent);
+        m_rects.clear();
+        m_restDirty = true; // the texture is (re)created while painting, with GL current
+        return true;
+    }
+
+    QRect XorCursorEffect::damageRect() const
+    {
+        if (!m_hasCursor) {
+            return QRect();
+        }
+        const QRectF rect(effects->cursorPos() - m_hotSpot, m_logicalSize);
+        // Rounded outward, plus a margin for sub-pixel rounding at fractional scales.
+        return rect.toAlignedRect().adjusted(-1, -1, 1, 1);
+    }
+
+    void XorCursorEffect::scheduleRepaint(bool force)
+    {
+        const QRect rect = damageRect();
+        if (!force && rect == m_lastRect) {
+            return;
+        }
+        if (!m_lastRect.isEmpty()) {
+            repaintRect(m_lastRect);
+        }
+        if (!rect.isEmpty()) {
+            repaintRect(rect);
+        }
+        m_lastRect = rect;
+    }
+
+    void XorCursorEffect::slotCursorShapeChanged()
+    {
+        refreshCursorImage();
+        scheduleRepaint(true);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Painting
+    // ---------------------------------------------------------------------------
+
+    void XorCursorEffect::prePaintScreen(ScreenPrePaintData &data)
+    {
+        // The cursor is drawn by modifying what is already in the buffer, which is not
+        // idempotent: a frame that doesn't recompose the area under the cursor would
+        // invert the previous frame's result back. Putting the cursor rect into every
+        // frame's paint region prevents that, however small the frame's own damage.
+        if (refreshCursorImage()) {
+            const QRect rect = damageRect();
+            if (!rect.isEmpty()) {
+                data.paint += Rect(rect);
+            }
+            // Also clean up where the cursor was, in case no event told us it moved.
+            if (!m_lastRect.isEmpty() && m_lastRect != rect) {
+                data.paint += Rect(m_lastRect);
+            }
+        }
+        Effect::prePaintScreen(data);
+    }
+
     bool XorCursorEffect::paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport,
                                       int mask, const Region &deviceRegion, LogicalOutput *screen)
     {
@@ -198,128 +319,68 @@ namespace KWin
         return ret;
     }
 
-    void XorCursorEffect::rebuildCursor(const QImage &source)
+    const QList<QRect> &XorCursorEffect::scaledRects(const QSize &deviceSize)
     {
-        // Fully opaque pixels (alpha == 255) are the ones that invert. They are
-        // collected as rects and removed from a copy of the cursor image, so that the
-        // remaining, even slightly transparent, pixels can be drawn as the theme
-        // intended.
-        QImage image = source.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-
-        m_opaqueRects.clear();
-        m_scaledCache.clear();
-        bool hasTranslucent = false;
-
-        // Runs of opaque pixels with the same x and width in consecutive rows are
-        // merged into one rect. This keeps the rect count (and so the number of draw
-        // calls per frame) low without any quadratic region unions.
-        QHash<quint64, int> open;
-        QHash<quint64, int> next;
-        for (int y = 0; y < image.height(); ++y) {
-            QRgb *line = reinterpret_cast<QRgb *>(image.scanLine(y));
-            next.clear();
-            int x = 0;
-            while (x < image.width()) {
-                if (qAlpha(line[x]) == 255) {
-                    const int start = x;
-                    while (x < image.width() && qAlpha(line[x]) == 255) {
-                        line[x] = 0;
-                        ++x;
-                    }
-                    const quint64 key = (quint64(start) << 32) | quint32(x - start);
-                    const auto it = open.constFind(key);
-                    if (it != open.constEnd()) {
-                        m_opaqueRects[*it].setHeight(m_opaqueRects[*it].height() + 1);
-                        next.insert(key, *it);
-                    } else {
-                        m_opaqueRects.append(QRect(start, y, x - start, 1));
-                        next.insert(key, m_opaqueRects.size() - 1);
-                    }
-                } else {
-                    hasTranslucent = hasTranslucent || qAlpha(line[x]) != 0;
-                    ++x;
-                }
-            }
-            std::swap(open, next);
-        }
-
-        if (hasTranslucent) {
-            image.setDevicePixelRatio(source.devicePixelRatio());
-            m_translucentTexture = GLTexture::upload(image);
-            if (m_translucentTexture) {
-                m_translucentTexture->setFilter(GL_LINEAR);
-                m_translucentTexture->setWrapMode(GL_CLAMP_TO_EDGE);
-            }
-        } else {
-            m_translucentTexture.reset();
-        }
-
-        m_cacheKey = source.cacheKey();
-    }
-
-    const QList<QRect> &XorCursorEffect::scaledRects(qreal factor)
-    {
-        const int key = qRound(factor * 1024);
-        auto it = m_scaledCache.find(key);
-        if (it != m_scaledCache.end()) {
+        const quint32 key = (quint32(deviceSize.width()) << 16) | quint32(deviceSize.height() & 0xffff);
+        const auto it = m_rects.constFind(key);
+        if (it != m_rects.constEnd()) {
             return *it;
         }
+        return *m_rects.insert(key, m_mask.scaled(deviceSize));
+    }
 
-        // Scale to device pixels. QRegion normalises its rects so they never overlap,
-        // which matters because subtract blending would otherwise apply twice.
-        QRegion region;
-        for (const QRect &r : std::as_const(m_opaqueRects)) {
-            region += QRectF(r.x() * factor, r.y() * factor,
-                             r.width() * factor, r.height() * factor)
-            .toAlignedRect();
+    void XorCursorEffect::ensureRestTexture()
+    {
+        if (!m_restDirty) {
+            return;
         }
-        QList<QRect> rects;
-        for (const QRect &r : region) {
-            rects.append(r);
+        m_restDirty = false;
+        m_restTexture.reset();
+        if (m_drawTranslucent && !m_mask.rest().isNull()) {
+            m_restTexture = GLTexture::upload(m_mask.rest());
+            if (m_restTexture) {
+                m_restTexture->setFilter(GL_LINEAR);
+                m_restTexture->setWrapMode(GL_CLAMP_TO_EDGE);
+            }
         }
-        // Cached per factor, so outputs with different scales don't rebuild every frame.
-        return m_scaledCache.insert(key, rects).value();
     }
 
     bool XorCursorEffect::paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport)
     {
-        if (!m_whiteTexture || !m_blackTexture) {
+        if (!m_hasCursor || !isActive()) {
             return false;
         }
 
-        const PlatformCursorImage cursor = effects->cursorImage();
-        const QImage image = cursor.image();
-        if (image.isNull()) {
-            return false;
-        }
-
+        // Everything below is per output: its scale, colour description and
+        // framebuffer format can all differ from the other outputs'.
         const qreal scale = viewport.scale();
-        const qreal dpr = image.devicePixelRatio() > 0 ? image.devicePixelRatio() : 1.0;
-        // image pixels -> output device pixels
-        const qreal factor = scale / dpr;
-
-        // Position of the cursor image relative to the viewport, in logical coordinates.
         const auto renderRect = viewport.renderRect();
-        const QPointF pos = effects->cursorPos() - cursor.hotSpot() - renderRect.topLeft();
-        const QSizeF cursorSize = QSizeF(image.size()) / dpr;
 
-        // Nothing to do when the cursor is on another output.
-        const QRectF viewportRect(0, 0, renderRect.width(), renderRect.height());
-        if (!QRectF(pos, cursorSize).intersects(viewportRect)) {
+        // Snap to the device pixel grid so the mask and the image stay crisp and the
+        // damage rect stays exact at fractional scales.
+        const QPointF local = effects->cursorPos() - m_hotSpot - renderRect.topLeft();
+        const QPoint devicePos(qRound(local.x() * scale), qRound(local.y() * scale));
+        const QSize deviceSize(qRound(m_logicalSize.width() * scale),
+                               qRound(m_logicalSize.height() * scale));
+        if (deviceSize.isEmpty()) {
             return false;
         }
 
-        if (image.cacheKey() != m_cacheKey) {
-            rebuildCursor(image);
-        }
-        const QList<QRect> &opaque = scaledRects(factor);
-        const bool drawTranslucent = kDrawTranslucentParts && m_translucentTexture;
-        if (opaque.isEmpty() && !drawTranslucent) {
+        // Nothing to draw when the cursor isn't on (or overlapping) this output.
+        const QRect outputRect(0, 0, qRound(renderRect.width() * scale), qRound(renderRect.height() * scale));
+        if (!QRect(devicePos, deviceSize).intersects(outputRect)) {
             return false;
         }
 
-        // Decided once per frame; cheap state queries.
-        const bool needsClamp = !opaque.isEmpty() && !boundFramebufferIsFixedPoint();
+        ensureRestTexture();
+        const bool invert = m_mask.hasInvertedPixels();
+        const bool drawRest = m_restTexture != nullptr;
+        if (!invert && !drawRest) {
+            return false;
+        }
+
+        // Float buffers keep negative blend results, fixed-point ones clamp by themselves.
+        const bool needsClamp = invert && !boundFramebufferIsFixedPoint();
 
         BlendStateGuard guard;
         glEnable(GL_BLEND);
@@ -327,51 +388,56 @@ namespace KWin
         // One shader and one set of colourspace uniforms for all passes.
         auto s = ShaderManager::instance()->pushShader(ShaderTrait::MapTexture
         | ShaderTrait::TransformColorspace);
-        // A pure white texel is mapped to reference white in the render target's
-        // colour description, which gives us W in buffer units for free.
+        // A pure white texel is mapped to reference white in this render target's colour
+        // description, which gives us W in the buffer's own units on SDR and HDR alike,
+        // without assuming any particular encoding.
         s->setColorspaceUniforms(ColorDescription::sRGB,
                                  renderTarget.colorDescription(),
                                  RenderingIntent::Perceptual);
+        QMatrix4x4 mvp = viewport.projectionMatrix();
+        mvp.translate(devicePos.x(), devicePos.y());
+        s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
 
-        const QPointF devicePos = pos * scale;
-        // One solid rectangle per rect of opaque cursor pixels. The texture is a single
-        // solid texel, so texture coordinates don't matter. This avoids the Region-based
-        // GLTexture::render() overloads, whose API changes between releases.
-        auto drawRects = [&](GLTexture *texture) {
-            for (const QRect &r : opaque) {
-                QMatrix4x4 mvp = viewport.projectionMatrix();
-                mvp.translate(devicePos.x() + r.x(), devicePos.y() + r.y());
-                s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
-                texture->render(QSizeF(r.size()));
-            }
-        };
+        const QSizeF size(deviceSize);
 
-        if (!opaque.isEmpty()) {
-            // Pass 1: result = S - D, where S is white (W). Destination alpha is untouched.
+        if (invert) {
+            const QList<QRect> &rects = scaledRects(deviceSize);
+
+            // One solid rectangle per rect of inverted pixels. The textures are a single
+            // texel, so texture coordinates don't matter. (GLTexture::render(Region, size)
+            // would batch these but does not clip to the region, so it is not used.)
+            auto drawRects = [&](GLTexture *texture) {
+                for (const QRect &r : rects) {
+                    QMatrix4x4 rectMvp = mvp;
+                    rectMvp.translate(r.x(), r.y());
+                    s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, rectMvp);
+                    texture->render(QSizeF(r.size()));
+                }
+            };
+
+            // Pass 1: result = W - D inside the mask. Destination alpha is untouched.
             glBlendEquationSeparate(GL_FUNC_SUBTRACT, GL_FUNC_ADD);
             glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
             drawRects(m_whiteTexture.get());
 
-            // Pass 2: on float targets, pixels brighter than W went negative. MAX with
-            // black clamps them to 0. MIN/MAX ignore the blend factors. Fixed-point
-            // targets clamp on their own, so this pass is skipped for them.
+            // Pass 2 (float buffers only): pixels brighter than W went negative. MAX with
+            // black clamps them to 0. MIN/MAX ignore the blend factors.
             if (needsClamp) {
                 glBlendEquationSeparate(GL_MAX, GL_FUNC_ADD);
                 glBlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
                 drawRects(m_blackTexture.get());
             }
+
+            // Pass 3 draws at the cursor origin again.
+            s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
         }
 
-        // Pass 3: draw the remaining (partly transparent) cursor pixels normally.
-        // Set kDrawTranslucentParts to false to leave the screen untouched there.
-        if (drawTranslucent) {
+        // Pass 3: the remaining, partly transparent pixels, drawn the way the theme made
+        // them. Their texture has the inverted pixels cleared, so the passes never overlap.
+        if (drawRest) {
             glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
             glBlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
-
-            QMatrix4x4 mvp = viewport.projectionMatrix();
-            mvp.translate(devicePos.x(), devicePos.y());
-            s->setUniform(GLShader::Mat4Uniform::ModelViewProjectionMatrix, mvp);
-            m_translucentTexture->render(QSizeF(image.size()) * factor);
+            m_restTexture->render(size);
         }
 
         ShaderManager::instance()->popShader();
