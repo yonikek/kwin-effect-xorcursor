@@ -1,46 +1,100 @@
-/*
-    SPDX-FileCopyrightText: 2025 Jin Liu <m.liu.jin@gmail.com>
-
-    SPDX-License-Identifier: GPL-2.0-or-later
-*/
-
+// SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 
-#include "core/colorspace.h"
-#include "effect/effect.h"
+#include "cursormask.h"
+
+#include <effect/effect.h>
+
+#include <QHash>
+#include <QImage>
+#include <QList>
+#include <QPointF>
+#include <QRect>
+#include <QSizeF>
+
+#include <QPointer>
+
+#include <memory>
+#include <unordered_map>
 
 namespace KWin
 {
 
-class GLFramebuffer;
-class GLTexture;
-class GLVertexBuffer;
-class GLShader;
+    class GLTexture;
+    class GLVertexBuffer;
 
-class XorCursorEffect : public Effect
-{
-    Q_OBJECT
+    /**
+     * Draws the mouse cursor so that its fully opaque pixels invert whatever is
+     * underneath, on SDR and HDR outputs, on any number of outputs.
+     */
+    class XorCursorEffect : public Effect
+    {
+        Q_OBJECT
 
-public:
-    XorCursorEffect();
-    ~XorCursorEffect() override;
+    public:
+        XorCursorEffect();
+        ~XorCursorEffect() override;
 
-    void paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport, int mask, const Region &deviceRegion, LogicalOutput *screen) override;
-    bool isActive() const override;
+        static bool supported();
 
-private Q_SLOTS:
-    void slotMouseChanged(const QPointF &pos, const QPointF &old);
+        bool isActive() const override;
+        int requestedEffectChainPosition() const override;
+        void reconfigure(ReconfigureFlags flags) override;
+        bool blocksDirectScanout() const override;
 
-private:
-    void showCursor();
-    void hideCursor();
-    GLTexture *ensureCursorTexture();
-    void markCursorTextureDirty();
+        void prePaintScreen(ScreenPrePaintData &data) override;
+        [[nodiscard]] bool paintScreen(const RenderTarget &renderTarget, const RenderViewport &viewport,
+                                       int mask, const Region &deviceRegion, LogicalOutput *screen) override;
 
-    std::unique_ptr<GLTexture> m_cursorTexture;
-    bool m_cursorTextureDirty = false;
-    bool m_isMouseHidden = false;
-    QPoint m_cursorPoint;
-};
+    private Q_SLOTS:
+        void slotCursorShapeChanged();
+
+    private:
+        bool refreshCursorImage();
+        QRect damageRect() const;
+        void scheduleRepaint(bool force);
+        void hideRealCursor();
+        void showRealCursor();
+        void refreshCursorHidingEffects();
+        bool anotherEffectHidesCursor() const;
+        GLVertexBuffer *maskBuffer(const QSize &deviceSize);
+        void ensureRestTexture();
+        bool paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport);
+
+        // --- configuration (kwinrc, group "Effect-xorcursor") ---
+        int m_invertThreshold = 255;
+        bool m_drawTranslucent = true;
+
+        // --- cursor image state, refreshed only when the image changes ---
+        bool m_hasCursor = false;
+        QImage m_image;
+        qint64 m_imageKey = 0;
+        QPointF m_hotSpot;
+        QSizeF m_logicalSize;
+        XorCursorDetail::CursorMask m_mask;
+        // The inverted pixels as one triangle list per device size (one entry per output
+        // scale), so the whole mask is a single draw call. Created while painting, with
+        // the GL context current; m_buffersDirty defers clearing to the next paint.
+        std::unordered_map<quint32, std::unique_ptr<GLVertexBuffer>> m_buffers;
+        bool m_buffersDirty = false;
+        bool m_restDirty = true;
+
+        // --- GL resources (created and destroyed with the GL context current) ---
+        std::unique_ptr<GLTexture> m_whiteTexture;
+        std::unique_ptr<GLTexture> m_blackTexture;
+        std::unique_ptr<GLTexture> m_restTexture;
+
+        // --- coordination with the built-in cursor effects ---
+        // Both shakecursor and hidecursor are instantiated at startup and toggled
+        // active/inactive in place, so one lookup in the constructor is enough.
+        // QPointer nulls itself when an effect gets unloaded.
+        QPointer<Effect> m_shakeCursor;
+        QPointer<Effect> m_hideCursor;
+
+        // --- bookkeeping ---
+        bool m_cursorHidden = false;
+        // Where the cursor was when we last scheduled a repaint (logical coordinates)
+        QRect m_lastRect;
+    };
 
 } // namespace KWin

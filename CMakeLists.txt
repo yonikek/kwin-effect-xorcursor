@@ -24,14 +24,19 @@ find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS
     Core
     Gui
     Widgets
+    DBus
 )
 
 find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
     CoreAddons
+    I18n
+    KCMUtils
+    Config
 )
 
 
 find_package(KWin REQUIRED)
+find_package(KWinDBusInterface REQUIRED)
 find_package(epoxy REQUIRED)
 
 add_subdirectory(src)
