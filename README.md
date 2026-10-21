@@ -22,15 +22,18 @@ XOR cursor effect for KDE Plasma
 - **One draw call per pass.** All inverted regions of the cursor are batched
   into a single static vertex buffer per output scale, so the number of
   rectangles in the mask doesn't affect the number of draw calls.
-- **Multi-monitor and fractional scale safe.** The mask is cached per output
-  scale, rounded outward without overlaps, and outputs that don't contain the
-  cursor are skipped entirely.
+- **Multi-monitor and fractional scale safe.** The cursor is positioned in
+  global coordinates (like KWin's own cursor effects), so outputs that don't
+  start at (0,0) are handled. The mask is cached per output scale, rounded
+  outward without overlaps, and outputs that don't contain the cursor are
+  skipped entirely.
 - **Handles cursor shape changes.** When the cursor image changes (resize
   handles, busy spinner, ...), the previous shape's footprint is invalidated,
   so no stale inverted pixels trail behind.
 - **Plays well with other cursor effects.** The effect steps aside while
   *Shake Cursor* or *Hide Cursor* owns the pointer, instead of inverting
-  whatever those effects just drew.
+  whatever those effects just drew. Those effects are looked up again from time
+  to time, so it doesn't matter whether they load before or after this one.
 - **Configurable.** Settings (invert threshold, whether translucent parts are
   drawn as themed) are available from the configure button of the Desktop
   Effects module and apply immediately; they live in `kwinrc` under the

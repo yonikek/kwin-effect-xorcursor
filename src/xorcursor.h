@@ -14,6 +14,7 @@
 
 #include <QPointer>
 
+#include <array>
 #include <memory>
 #include <unordered_map>
 
@@ -56,7 +57,7 @@ namespace KWin
         void hideRealCursor();
         void showRealCursor();
         void refreshCursorHidingEffects();
-        bool anotherEffectHidesCursor() const;
+        bool anotherEffectHidesCursor();
         GLVertexBuffer *maskBuffer(const QSize &deviceSize);
         void ensureRestTexture();
         bool paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport);
@@ -85,11 +86,12 @@ namespace KWin
         std::unique_ptr<GLTexture> m_restTexture;
 
         // --- coordination with the built-in cursor effects ---
-        // Both shakecursor and hidecursor are instantiated at startup and toggled
-        // active/inactive in place, so one lookup in the constructor is enough.
-        // QPointer nulls itself when an effect gets unloaded.
-        QPointer<Effect> m_shakeCursor;
-        QPointer<Effect> m_hideCursor;
+        // shakecursor and hidecursor hide the real cursor and draw their own, so we step
+        // aside while either is active. They may be loaded after us, so a missing one is
+        // looked up again from time to time. QPointer nulls itself when an effect is
+        // unloaded.
+        std::array<QPointer<Effect>, 2> m_cursorEffects;
+        int m_lookupTicks = 0;
 
         // --- bookkeeping ---
         bool m_cursorHidden = false;

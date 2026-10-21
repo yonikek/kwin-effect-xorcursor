@@ -127,11 +127,13 @@ namespace KWin
         m_blackTexture = makeSolidTexture(Qt::black);
 
         // Both shakecursor and hidecursor hide the pointer and draw their own
-        // cursor representation. Look them up once and step aside while either
-        // is active (anotherEffectHidesCursor()) so two effects never draw two
-        // different cursors at once.
+        // cursor representation. Step aside while either is active
+        // (anotherEffectHidesCursor()) so two effects never draw two different
+        // cursors at once. They may not be loaded yet, so this is retried later.
         refreshCursorHidingEffects();
 
+        // Same pattern as KWin's own effects: the settings live in KWin's config.
+        XorCursorSettings::instance(effects->config());
         reconfigure(ReconfigureAll);
 
         if (!isActive()) {
@@ -193,10 +195,10 @@ namespace KWin
     void XorCursorEffect::reconfigure(ReconfigureFlags)
     {
         // Options live in kwinrc under [Effect-xorcursor], which is exactly what
-        // the KConfigSkeleton generated from xorcursor.kcfg declares.
-        XorCursorSettings::instance(QStringLiteral("kwinrc"));
+        // the KConfigSkeleton generated from xorcursor.kcfg declares. The settings
+        // page writes through its own config object, so reread the file first.
+        effects->config()->reparseConfiguration();
         auto settings = XorCursorSettings::self();
-        settings->config()->reparseConfiguration();
         settings->read();
 
         const int threshold = std::clamp(settings->invertThreshold(), 1, 255);
@@ -204,6 +206,7 @@ namespace KWin
 
         m_invertThreshold = threshold;
         m_drawTranslucent = translucent;
+        refreshCursorHidingEffects();
 
         // Reconfigure is rare; unconditionally rebuild the mask next time instead
         // of comparing the previous option values.
@@ -234,20 +237,37 @@ namespace KWin
 
     void XorCursorEffect::refreshCursorHidingEffects()
     {
-        m_shakeCursor = effects->findEffect(QStringLiteral("shakecursor"));
-        m_hideCursor = effects->findEffect(QStringLiteral("hidecursor"));
+        // Plugin ids of the built-in effects that hide the cursor and draw their own.
+        static constexpr std::array<const char *, 2> ids{"shakecursor", "hidecursor"};
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (!m_cursorEffects[i]) {
+                m_cursorEffects[i] = effects->findEffect(QString::fromLatin1(ids[i]));
+            }
+        }
     }
 
-    bool XorCursorEffect::anotherEffectHidesCursor() const
+    bool XorCursorEffect::anotherEffectHidesCursor()
     {
+        // Effects can load after us (or be enabled later), which would leave a pointer
+        // null for good if we only looked once. Retry missing ones now and then; this
+        // runs per output and frame, so don't search every time.
+        constexpr int kLookupInterval = 120;
+        if (++m_lookupTicks >= kLookupInterval) {
+            m_lookupTicks = 0;
+            refreshCursorHidingEffects();
+        }
+
         // KWin reference-counts cursor hiding, so isCursorHidden() cannot tell us
         // whether a foreign effect has taken over the cursor: our own hideCursor()
-        // call already makes it return true. Instead, query the two built-in
-        // effects that render their own cursor and step aside while either is
-        // active. Two QPointer null checks plus at most two virtual isActive()
-        // calls, with no allocation.
-        return (m_shakeCursor && m_shakeCursor->isActive())
-            || (m_hideCursor && m_hideCursor->isActive());
+        // call already makes it return true. Instead, ask the built-in effects that
+        // render their own cursor. The real cursor stays hidden throughout (our hide
+        // is never released), so there is no flash when the other effect finishes.
+        for (const auto &effect : m_cursorEffects) {
+            if (effect && effect->isActive()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ---------------------------------------------------------------------------
@@ -419,10 +439,13 @@ namespace KWin
         const qreal scale = viewport.scale();
         const auto renderRect = viewport.renderRect();
 
-        // Snap to the device pixel grid so the mask and the image stay crisp and the
-        // damage rect stays exact at fractional scales.
-        const QPointF local = effects->cursorPos() - m_hotSpot - renderRect.topLeft();
-        const QPoint devicePos(qRound(local.x() * scale), qRound(local.y() * scale));
+        // RenderViewport::projectionMatrix() works in global logical coordinates times
+        // the scale (KWin's own shake-cursor effect translates the same way), so the
+        // output's origin must NOT be subtracted. Snap to the device pixel grid so the
+        // mask and the image stay crisp and the damage rect stays exact at fractional
+        // scales.
+        const QPointF global = effects->cursorPos() - m_hotSpot;
+        const QPoint devicePos(qRound(global.x() * scale), qRound(global.y() * scale));
         const QSize deviceSize(qRound(m_logicalSize.width() * scale),
                                qRound(m_logicalSize.height() * scale));
         if (deviceSize.isEmpty()) {
@@ -430,8 +453,8 @@ namespace KWin
         }
 
         // Nothing to draw when the cursor isn't on (or overlapping) this output.
-        const QRect outputRect(0, 0, qRound(renderRect.width() * scale), qRound(renderRect.height() * scale));
-        if (!QRect(devicePos, deviceSize).intersects(outputRect)) {
+        const QRectF outputLogical(renderRect.topLeft(), QSizeF(renderRect.width(), renderRect.height()));
+        if (!QRectF(global, m_logicalSize).intersects(outputLogical)) {
             return false;
         }
 
