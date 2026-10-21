@@ -369,7 +369,7 @@ namespace KWin
         // Step aside while shakecursor or hidecursor owns the cursor, otherwise this
         // effect would invert the cursor those effects just rendered.
         if (!anotherEffectHidesCursor()) {
-            paintCursor(renderTarget, viewport);
+            paintCursor(renderTarget, viewport, deviceRegion);
         }
         return ret;
     }
@@ -428,7 +428,7 @@ namespace KWin
         }
     }
 
-    bool XorCursorEffect::paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport)
+    bool XorCursorEffect::paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport, const Region &deviceRegion)
     {
         if (!m_hasCursor || !isActive()) {
             return false;
@@ -455,6 +455,19 @@ namespace KWin
         // Nothing to draw when the cursor isn't on (or overlapping) this output.
         const QRectF outputLogical(renderRect.topLeft(), QSizeF(renderRect.width(), renderRect.height()));
         if (!QRectF(global, m_logicalSize).intersects(outputLogical)) {
+            return false;
+        }
+
+        // The cursor is drawn by modifying what is already in the buffer, which is not
+        // idempotent. Only pixels that were recomposed in this paint are clean; if the
+        // cursor's area wasn't repainted at all, the previous frame's result is still
+        // correct there and inverting again would undo it. prePaintScreen() normally
+        // puts the cursor into every frame's paint region, so this is a safety net that
+        // also holds if another effect narrows the region. deviceRegion is in device
+        // coordinates, so map the cursor rect with the viewport's own conversion.
+        const Rect cursorDeviceRect = viewport.mapToDeviceCoordinatesAligned(
+            Rect(QRectF(global, m_logicalSize).toAlignedRect()));
+        if (!deviceRegion.intersects(cursorDeviceRect)) {
             return false;
         }
 

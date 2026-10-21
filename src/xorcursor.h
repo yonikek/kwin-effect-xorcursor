@@ -60,7 +60,7 @@ namespace KWin
         bool anotherEffectHidesCursor();
         GLVertexBuffer *maskBuffer(const QSize &deviceSize);
         void ensureRestTexture();
-        bool paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport);
+        bool paintCursor(const RenderTarget &renderTarget, const RenderViewport &viewport, const Region &deviceRegion);
 
         // --- configuration (kwinrc, group "Effect-xorcursor") ---
         int m_invertThreshold = 255;
